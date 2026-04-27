@@ -1,0 +1,53 @@
+{
+  "os": "windows",
+
+  "server": {
+    "backend_host": "0.0.0.0",
+    "backend_port": 8000,
+    "frontend_port": 3000,
+    "auto_open_browser": true
+  },
+
+  "network": {
+    "pip_proxy": "",
+    "npm_proxy": "",
+    "pip_trusted_hosts": [
+      "pypi.org",
+      "files.pythonhosted.org",
+      "pypi.python.org"
+    ],
+    "_comment": "회사 방화벽/프록시 사용 시: pip_proxy, npm_proxy 에 http://proxy.company.com:8080 형식으로 입력"
+  },
+
+  "scan": {
+    "default_timeout_sec": 10,
+    "max_concurrent_scans": 5,
+    "nmap_path": "",
+    "report_output_dir": "./reports"
+  },
+
+  "ai": {
+    "enabled": true,
+    "model": "claude-sonnet-4-20250514"
+  },
+
+  "alert": {
+    "repeat_threshold": 2,
+    "ssl_expiry_warn_days": 30,
+    "email_enabled": false,
+    "email_smtp": "",
+    "email_from": "",
+    "email_to": []
+  },
+
+  "news": {
+    "enabled": true,
+    "refresh_interval_min": 60,
+    "sources": ["krcert", "kisa", "fsec", "cisa", "nvd"]
+  },
+
+  "_comment": {
+    "os": "windows | linux",
+    "nmap_path": "windows 예시: C:/Program Files (x86)/Nmap/nmap.exe | linux: /usr/bin/nmap | 비워두면 자동탐색"
+  }
+}

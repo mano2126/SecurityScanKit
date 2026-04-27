@@ -1,0 +1,1064 @@
+import { useState, useEffect, useCallback, useRef } from "react";
+const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
+
+// ── 상수 ─────────────────────────────────────────────────────────
+const SEV = {
+  critical: { label:"긴급",   color:"#F87171", bg:"rgba(248,113,113,.12)", border:"rgba(248,113,113,.25)" },
+  high:     { label:"고위험", color:"#FB923C", bg:"rgba(251,146,60,.12)",  border:"rgba(251,146,60,.25)" },
+  medium:   { label:"중위험", color:"#FBBF24", bg:"rgba(251,191,36,.12)",  border:"rgba(251,191,36,.25)" },
+  low:      { label:"저위험", color:"#4ADE80", bg:"rgba(74,222,128,.12)",  border:"rgba(74,222,128,.25)" },
+  info:     { label:"정보",   color:"#94A3B8", bg:"rgba(148,163,184,.12)", border:"rgba(148,163,184,.25)" },
+};
+const SRC = {
+  "KrCERT":   "#60A5FA",   // 파란색 — KISA 산하 침해사고대응팀
+  "KISA":     "#34D399",   // 초록색 — 한국인터넷진흥원
+  "금융보안원": "#818CF8",  // 보라색 — 금융보안원
+  "CISA":     "#F472B6",
+  "CISA KEV": "#F43F5E",
+  "NVD":      "#FBBF24",
+};
+
+const SevBadge = ({sev, small=false}) => {
+  const s = SEV[sev]||SEV.info;
+  return <span style={{fontSize:small?9:10,padding:small?"1px 5px":"2px 8px",borderRadius:6,
+    fontWeight:700,color:s.color,background:s.bg,border:`1px solid ${s.border}`,
+    whiteSpace:"nowrap"}}>{s.label}</span>;
+};
+const SrcBadge = ({src}) => (
+  <span style={{fontSize:9,padding:"1px 7px",borderRadius:6,fontWeight:700,
+    color:SRC[src]||"#94A3B8",background:`${SRC[src]||"#94A3B8"}15`,
+    border:`1px solid ${SRC[src]||"#94A3B8"}33`}}>{src}</span>
+);
+const Spin = () => <span style={{width:13,height:13,display:"inline-block",borderRadius:"50%",
+  border:"2px solid var(--accent)",borderTopColor:"transparent",
+  animation:"spin .8s linear infinite"}}/>;
+
+// ── 드래그 리사이즈 패널 ─────────────────────────────────────────
+function ResizablePanels({ left, right, defaultLeft=300, minLeft=180, maxLeft=600, storageKey="threat_panel_w" }) {
+  const [leftW, setLeftW] = useState(() => {
+    try { return parseInt(localStorage.getItem(storageKey)||String(defaultLeft)); }
+    catch { return defaultLeft; }
+  });
+  const dragging = useRef(false);
+  const startX   = useRef(0);
+  const startW   = useRef(0);
+  const containerRef = useRef(null);
+
+  const onMouseDown = (e) => {
+    dragging.current = true;
+    startX.current   = e.clientX;
+    startW.current   = leftW;
+    document.body.style.cursor   = "col-resize";
+    document.body.style.userSelect = "none";
+    e.preventDefault();
+  };
+
+  useEffect(() => {
+    const onMove = (e) => {
+      if (!dragging.current) return;
+      const delta = e.clientX - startX.current;
+      const newW  = Math.max(minLeft, Math.min(maxLeft, startW.current + delta));
+      setLeftW(newW);
+    };
+    const onUp = () => {
+      if (!dragging.current) return;
+      dragging.current = false;
+      document.body.style.cursor     = "";
+      document.body.style.userSelect = "";
+      try { localStorage.setItem(storageKey, String(leftW)); } catch {}
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup",   onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup",   onUp);
+    };
+  }, [leftW, minLeft, maxLeft, storageKey]);
+
+  // localStorage 저장 (leftW 변경 시)
+  useEffect(() => {
+    try { localStorage.setItem(storageKey, String(leftW)); } catch {}
+  }, [leftW, storageKey]);
+
+  return (
+    <div ref={containerRef} style={{display:"flex",gap:0,minWidth:0,width:"100%"}}>
+      {/* 왼쪽 패널 */}
+      <div style={{width:leftW,flexShrink:0,minWidth:0,overflowX:"hidden"}}>
+        {left}
+      </div>
+      {/* 드래그 핸들 */}
+      <div onMouseDown={onMouseDown}
+        style={{width:6,flexShrink:0,cursor:"col-resize",position:"relative",
+          background:"transparent",zIndex:10,display:"flex",alignItems:"center",justifyContent:"center"}}
+        title="드래그해서 크기 조절">
+        <div style={{width:3,height:40,borderRadius:2,background:"var(--bdr)",
+          transition:"background .15s",opacity:.7}}
+          onMouseEnter={e=>e.currentTarget.style.background="var(--accent)"}
+          onMouseLeave={e=>e.currentTarget.style.background="var(--bdr)"}/>
+      </div>
+      {/* 오른쪽 패널 */}
+      <div style={{flex:1,minWidth:0,overflow:"hidden"}}>
+        {right}
+      </div>
+    </div>
+  );
+}
+
+// ── Claude API 번역 ──────────────────────────────────────────────
+async function translateKo(text) {
+  if (!text?.trim()) return "";
+  const krRatio = (text.match(/[가-힣]/g)||[]).length / text.length;
+  if (krRatio > 0.25) return text; // 이미 한글
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 1000,
+        messages: [{
+          role: "user",
+          content: `아래 보안 취약점 설명을 자연스러운 한국어로 번역하세요.\nCVE, CVSS, SQL Injection, RCE 같은 기술 용어는 영어 그대로 유지하세요.\n번역문만 출력하세요 (설명 없이).\n\n${text}`
+        }]
+      })
+    });
+    const data = await res.json();
+    return data.content?.[0]?.text?.trim() || text;
+  } catch { return text; }
+}
+
+// ── 안내 박스 ────────────────────────────────────────────────────
+const CVE_GUIDE = (
+  <div style={{background:"rgba(37,99,235,.04)",border:"1px solid rgba(37,99,235,.15)",
+    borderRadius:10,padding:"14px 18px",marginBottom:12}}>
+    <div style={{display:"flex",alignItems:"flex-start",gap:12}}>
+      <div style={{fontSize:28,flexShrink:0}}>🔴</div>
+      <div style={{flex:1,minWidth:0}}>
+        <div style={{fontSize:13,fontWeight:700,color:"var(--txt)",marginBottom:4}}>CVE (Common Vulnerabilities and Exposures) 란?</div>
+        <div style={{fontSize:11,color:"var(--txt2)",lineHeight:1.7,marginBottom:8}}>
+          전 세계 소프트웨어·하드웨어에서 발견된 <strong style={{color:"var(--txt)"}}>보안 취약점의 고유 번호 체계</strong>입니다.
+          미국 MITRE Corporation이 관리하며 <code style={{background:"var(--bg-card2)",padding:"0 4px",borderRadius:3,fontSize:10}}>CVE-2024-12345</code> 형식으로 부여됩니다.
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8}}>
+          {[
+            {icon:"📊",title:"CVSS 점수",desc:"0~10점 심각도. 9.0 이상은 즉시 패치"},
+            {icon:"🏦",title:"금융권 영향",desc:"금감원 검사 지적 대상"},
+            {icon:"⚡",title:"CISA KEV",desc:"실제 공격 악용 — 최우선 조치"},
+          ].map(g=>(
+            <div key={g.title} style={{background:"var(--bg-card)",borderRadius:6,padding:"8px 10px",border:"1px solid var(--bdr)"}}>
+              <div style={{fontSize:14,marginBottom:3}}>{g.icon}</div>
+              <div style={{fontSize:10,fontWeight:700,color:"var(--txt)",marginBottom:2}}>{g.title}</div>
+              <div style={{fontSize:9,color:"var(--txt3)",lineHeight:1.5}}>{g.desc}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  </div>
+);
+
+const KEV_GUIDE = (
+  <div style={{background:"rgba(244,63,94,.04)",border:"1px solid rgba(244,63,94,.2)",
+    borderRadius:10,padding:"14px 18px",marginBottom:12}}>
+    <div style={{display:"flex",alignItems:"flex-start",gap:12}}>
+      <div style={{fontSize:28,flexShrink:0}}>⚠</div>
+      <div style={{flex:1,minWidth:0}}>
+        <div style={{fontSize:13,fontWeight:700,color:"var(--txt)",marginBottom:4}}>CISA KEV — 알려진 악용 취약점</div>
+        <div style={{fontSize:11,color:"var(--txt2)",lineHeight:1.7,marginBottom:8}}>
+          미국 CISA가 <strong style={{color:"#F43F5E"}}>실제 사이버 공격에서 악용이 확인된</strong> 취약점만 선별한 목록입니다.
+          금융기관은 이 목록을 최우선 패치 기준으로 활용해야 합니다.
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:6}}>
+          {[
+            {icon:"🎯",title:"실제 악용 확인",desc:"이론이 아닌 실전 공격"},
+            {icon:"⏰",title:"조치 기한 명시",desc:"기한 내 패치 필수"},
+            {icon:"📋",title:"즉시 점검",desc:"자산 영향 여부 확인"},
+            {icon:"🏦",title:"금감원 주목",desc:"침해사고 주요 원인"},
+          ].map(g=>(
+            <div key={g.title} style={{background:"var(--bg-card)",borderRadius:6,padding:"7px 9px",border:"1px solid var(--bdr)"}}>
+              <div style={{fontSize:14,marginBottom:2}}>{g.icon}</div>
+              <div style={{fontSize:9,fontWeight:700,color:"var(--txt)",marginBottom:1}}>{g.title}</div>
+              <div style={{fontSize:9,color:"var(--txt3)",lineHeight:1.4}}>{g.desc}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  </div>
+);
+
+// ── 뉴스 상세 패널 ───────────────────────────────────────────────
+function NewsDetail({ item, onClose }) {
+  const [translating, setTranslating] = useState(false);
+  const [translated,  setTranslated]  = useState("");
+  const [showTrans,   setShowTrans]   = useState(false);
+
+  useEffect(() => { setTranslated(""); setShowTrans(false); }, [item?.id]);
+
+  const handleTranslate = async () => {
+    if (showTrans) { setShowTrans(false); return; }
+    if (translated) { setShowTrans(true); return; }
+    setTranslating(true);
+    const r = await translateKo((item?.summary||"") + (item?.title ? "\n제목: "+item.title : ""));
+    setTranslated(r); setShowTrans(true); setTranslating(false);
+  };
+
+  if (!item) return (
+    <div style={{background:"var(--bg-card)",border:"1px solid var(--bdr)",borderRadius:10,
+      height:"100%",display:"flex",flexDirection:"column",alignItems:"center",
+      justifyContent:"center",gap:8,color:"var(--txt3)",padding:"40px 20px",textAlign:"center"}}>
+      <div style={{fontSize:36,opacity:.2}}>📰</div>
+      <div style={{fontSize:12}}>왼쪽 목록에서 공지·뉴스를 선택하면<br/>상세 내용이 여기에 표시됩니다</div>
+    </div>
+  );
+
+  const s = SEV[item.severity]||SEV.info;
+  const hasEnglish = item.summary && (item.summary.match(/[가-힣]/g)||[]).length / item.summary.length < 0.25;
+
+  return (
+    <div style={{background:"var(--bg-card)",border:`1px solid ${s.border}`,borderRadius:10,
+      overflow:"hidden",borderTop:`3px solid ${s.color}`,display:"flex",flexDirection:"column",
+      maxHeight:"calc(100vh - 280px)"}}>
+      <div style={{padding:"12px 14px",borderBottom:"1px solid var(--bdr)",background:"var(--bg-card2)",flexShrink:0}}>
+        <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:6}}>
+          <SevBadge sev={item.severity}/><SrcBadge src={item.source}/>
+          <span style={{fontSize:10,color:"var(--txt3)",marginLeft:"auto"}}>
+            {new Date(item.published_at).toLocaleDateString("ko-KR",{month:"2-digit",day:"2-digit"})}
+          </span>
+          <button onClick={onClose} style={{background:"transparent",border:"none",cursor:"pointer",
+            color:"var(--txt3)",fontSize:15,padding:"0 2px"}}>✕</button>
+        </div>
+        <div style={{fontSize:13,fontWeight:700,color:"var(--txt)",lineHeight:1.5,wordBreak:"break-word"}}>{item.title}</div>
+      </div>
+      <div style={{padding:"12px 14px",overflowY:"auto",flex:1}}>
+        {item.summary ? (
+          <>
+            <div style={{fontSize:10,fontWeight:700,color:"var(--txt3)",textTransform:"uppercase",
+              letterSpacing:".06em",marginBottom:6}}>📋 요약</div>
+            <div style={{fontSize:12,color:"var(--txt)",lineHeight:1.8,
+              background:"var(--bg-card2)",padding:"10px 12px",borderRadius:7,border:"1px solid var(--bdr)",
+              wordBreak:"break-word"}}>
+              {showTrans && translated ? translated : item.summary}
+            </div>
+            {hasEnglish && (
+              <button onClick={handleTranslate} disabled={translating}
+                style={{marginTop:8,padding:"5px 12px",borderRadius:6,fontSize:11,cursor:"pointer",
+                  border:"1px solid rgba(96,165,250,.3)",background:"rgba(96,165,250,.08)",
+                  color:"#60A5FA",display:"flex",alignItems:"center",gap:5,opacity:translating?.6:1}}>
+                {translating ? <><Spin/> 번역 중...</> : showTrans ? "↩ 원문" : "🇰🇷 한국어 번역"}
+              </button>
+            )}
+          </>
+        ) : (
+          <div style={{fontSize:12,color:"var(--txt3)",textAlign:"center",padding:"20px 0"}}>
+            상세 내용 없음 — 원문에서 확인하세요
+          </div>
+        )}
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,marginTop:12,marginBottom:12}}>
+          {[
+            {l:"출처",  v:item.source},
+            {l:"심각도",v:SEV[item.severity]?.label||item.severity},
+            {l:"발행일",v:new Date(item.published_at).toLocaleDateString("ko-KR")},
+          ].map(d=>(
+            <div key={d.l} style={{background:"var(--bg-card2)",borderRadius:5,padding:"6px 8px",border:"1px solid var(--bdr)"}}>
+              <div style={{fontSize:8,color:"var(--txt3)",textTransform:"uppercase",marginBottom:2}}>{d.l}</div>
+              <div style={{fontSize:11,fontWeight:600,color:"var(--txt)"}}>{d.v||"—"}</div>
+            </div>
+          ))}
+        </div>
+        {item.url && (
+          <a href={item.url} target="_blank" rel="noreferrer"
+            style={{display:"flex",alignItems:"center",gap:6,padding:"8px 12px",borderRadius:7,
+              border:"1px solid rgba(96,165,250,.3)",background:"rgba(96,165,250,.08)",
+              color:"#60A5FA",textDecoration:"none",fontSize:12,fontWeight:600}}>
+            🔗 원문 보기 →
+          </a>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── CVE 상세 패널 ────────────────────────────────────────────────
+function CveDetail({ item, onClose }) {
+  const [translating, setTranslating] = useState(false);
+  const [translated,  setTranslated]  = useState("");
+  const [showTrans,   setShowTrans]   = useState(false);
+
+  useEffect(() => { setTranslated(""); setShowTrans(false); }, [item?.id]);
+
+  const handleTranslate = async () => {
+    if (showTrans) { setShowTrans(false); return; }
+    if (translated) { setShowTrans(true); return; }
+    setTranslating(true);
+    const r = await translateKo(item?.description||"");
+    setTranslated(r); setShowTrans(true); setTranslating(false);
+  };
+
+  if (!item) return (
+    <div style={{background:"var(--bg-card)",border:"1px solid var(--bdr)",borderRadius:10,
+      height:"100%",display:"flex",flexDirection:"column",alignItems:"center",
+      justifyContent:"center",gap:8,color:"var(--txt3)",padding:"40px 20px",textAlign:"center"}}>
+      <div style={{fontSize:36,opacity:.2}}>🔴</div>
+      <div style={{fontSize:12}}>왼쪽 목록에서 CVE를 선택하면<br/>상세 내용이 여기에 표시됩니다</div>
+    </div>
+  );
+
+  let affected = [];
+  try { affected = JSON.parse(item.affected_products||"[]"); } catch {}
+  const isKev = item.source==="CISA KEV";
+  const duePast = item.kev_due_date && new Date(item.kev_due_date) < new Date();
+  const cvssColor = item.cvss_score>=9?"#F87171":item.cvss_score>=7?"#FB923C":"#FBBF24";
+  const hasEnglish = item.description && (item.description.match(/[가-힣]/g)||[]).length / item.description.length < 0.25;
+
+  return (
+    <div style={{background:"var(--bg-card)",border:"1px solid var(--bdr)",borderRadius:10,
+      overflow:"hidden",borderTop:`3px solid ${isKev?"#F43F5E":cvssColor}`,
+      display:"flex",flexDirection:"column",maxHeight:"calc(100vh - 280px)"}}>
+      {/* 헤더 */}
+      <div style={{padding:"12px 14px",borderBottom:"1px solid var(--bdr)",background:"var(--bg-card2)",flexShrink:0}}>
+        <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:6,flexWrap:"wrap"}}>
+          <code style={{fontSize:12,fontWeight:700,color:"#60A5FA"}}>{item.cve_id}</code>
+          {isKev && <span style={{fontSize:9,padding:"1px 6px",borderRadius:4,fontWeight:700,
+            background:"rgba(244,63,94,.2)",color:"#F43F5E",border:"1px solid rgba(244,63,94,.3)"}}>⚠ KEV</span>}
+          <SevBadge sev={item.severity}/>
+          <button onClick={onClose} style={{marginLeft:"auto",background:"transparent",border:"none",
+            cursor:"pointer",color:"var(--txt3)",fontSize:15,padding:"0 2px"}}>✕</button>
+        </div>
+        <div style={{fontSize:12,fontWeight:600,color:"var(--txt)",lineHeight:1.5,wordBreak:"break-word"}}>
+          {item.title?.replace(item.cve_id+": ","")?.replace("[KEV] ","")}
+        </div>
+      </div>
+      {/* 본문 */}
+      <div style={{padding:"12px 14px",overflowY:"auto",flex:1}}>
+        {/* KPI */}
+        <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:6,marginBottom:12}}>
+          <div style={{background:item.cvss_score>=9?"rgba(248,113,113,.08)":"rgba(251,146,60,.08)",
+            borderRadius:7,padding:"8px 10px",border:`1px solid ${cvssColor}33`,textAlign:"center"}}>
+            <div style={{fontSize:20,fontWeight:700,color:cvssColor}}>{item.cvss_score?.toFixed(1)||"N/A"}</div>
+            <div style={{fontSize:9,color:"var(--txt3)",marginTop:1}}>CVSS 점수</div>
+          </div>
+          <div style={{background:"var(--bg-card2)",borderRadius:7,padding:"8px 10px",border:"1px solid var(--bdr)",textAlign:"center"}}>
+            <div style={{fontSize:12,fontWeight:700,color:"var(--txt)"}}>{item.cwe||"—"}</div>
+            <div style={{fontSize:9,color:"var(--txt3)",marginTop:1}}>CWE 분류</div>
+          </div>
+          <div style={{background:"var(--bg-card2)",borderRadius:7,padding:"8px 10px",border:"1px solid var(--bdr)",textAlign:"center"}}>
+            <div style={{fontSize:11,fontWeight:600,color:"var(--txt)"}}>
+              {item.published_at ? new Date(item.published_at).toLocaleDateString("ko-KR") : "—"}
+            </div>
+            <div style={{fontSize:9,color:"var(--txt3)",marginTop:1}}>공개일</div>
+          </div>
+        </div>
+
+        {/* CVSS 벡터 */}
+        {item.cvss_vector && (
+          <div style={{marginBottom:10,padding:"6px 10px",background:"var(--bg-card2)",
+            borderRadius:6,border:"1px solid var(--bdr)"}}>
+            <div style={{fontSize:9,color:"var(--txt3)",marginBottom:2}}>CVSS 벡터</div>
+            <code style={{fontSize:10,color:"var(--accent-text)",wordBreak:"break-all"}}>{item.cvss_vector}</code>
+          </div>
+        )}
+
+        {/* 설명 */}
+        {item.description && (
+          <div style={{marginBottom:10}}>
+            <div style={{fontSize:10,fontWeight:700,color:"var(--txt3)",textTransform:"uppercase",
+              letterSpacing:".06em",marginBottom:5}}>📋 취약점 설명</div>
+            <div style={{fontSize:12,color:"var(--txt)",lineHeight:1.8,
+              background:"var(--bg-card2)",padding:"10px 12px",borderRadius:7,
+              border:"1px solid var(--bdr)",wordBreak:"break-word"}}>
+              {showTrans && translated ? translated : item.description}
+            </div>
+            {hasEnglish && (
+              <button onClick={handleTranslate} disabled={translating}
+                style={{marginTop:7,padding:"5px 12px",borderRadius:6,fontSize:11,cursor:"pointer",
+                  border:"1px solid rgba(96,165,250,.3)",background:"rgba(96,165,250,.08)",
+                  color:"#60A5FA",display:"flex",alignItems:"center",gap:5,
+                  opacity:translating?.6:1}}>
+                {translating ? <><Spin/> 번역 중...</> : showTrans ? "↩ 원문 보기" : "🇰🇷 한국어로 번역"}
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* 영향 제품 */}
+        {affected.length > 0 && (
+          <div style={{marginBottom:10}}>
+            <div style={{fontSize:10,fontWeight:700,color:"var(--txt3)",textTransform:"uppercase",
+              letterSpacing:".06em",marginBottom:5}}>📦 영향 받는 제품</div>
+            <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+              {affected.map((p,i)=>(
+                <span key={i} style={{fontSize:10,padding:"2px 7px",borderRadius:4,
+                  background:"var(--bg-card2)",color:"var(--txt2)",border:"1px solid var(--bdr)"}}>{p}</span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* KEV 정보 */}
+        {isKev && item.kev_action && (
+          <div style={{marginBottom:8,padding:"9px 11px",background:"rgba(74,222,128,.07)",
+            borderRadius:7,border:"1px solid rgba(74,222,128,.2)"}}>
+            <div style={{fontSize:10,color:"#4ADE80",fontWeight:700,marginBottom:3}}>✅ CISA 권고 조치</div>
+            <div style={{fontSize:11,color:"var(--txt)",lineHeight:1.6,wordBreak:"break-word"}}>{item.kev_action}</div>
+          </div>
+        )}
+        {isKev && item.kev_due_date && (
+          <div style={{marginBottom:10,padding:"8px 11px",
+            background:duePast?"rgba(248,113,113,.08)":"rgba(251,191,36,.08)",
+            borderRadius:7,border:`1px solid ${duePast?"rgba(248,113,113,.3)":"rgba(251,191,36,.3)"}`}}>
+            <div style={{fontSize:11,fontWeight:700,color:duePast?"#F87171":"#FBBF24"}}>
+              {duePast?"⚠ 조치 기한 초과: ":"📅 조치 기한: "}{item.kev_due_date}
+            </div>
+          </div>
+        )}
+
+        {item.url && (
+          <a href={item.url} target="_blank" rel="noreferrer"
+            style={{display:"flex",alignItems:"center",gap:6,padding:"8px 12px",borderRadius:7,
+              border:"1px solid rgba(96,165,250,.3)",background:"rgba(96,165,250,.08)",
+              color:"#60A5FA",textDecoration:"none",fontSize:12,fontWeight:600}}>
+            🔗 NVD 원문 보기 →
+          </a>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── 메인 컴포넌트 ────────────────────────────────────────────────
+export default function PageThreatIntel() {
+  const [tab,        setTab]        = useState("dashboard");
+  const [news,       setNews]       = useState([]);
+  const [cves,       setCves]       = useState([]);
+  const [newsStats,  setNewsStats]  = useState({});
+  const [cveStats,   setCveStats]   = useState({});
+  const [loading,    setLoading]    = useState(true);
+  const [collecting, setCollecting] = useState(false);
+  const [lastSync,   setLastSync]   = useState(null);
+  const [selNews,    setSelNews]    = useState(null);
+  const [selCve,     setSelCve]     = useState(null);
+  const [showMgr,    setShowMgr]    = useState(false);
+  const [srcList,    setSrcList]    = useState([]);
+  const [selSrcs,    setSelSrcs]    = useState(new Set());
+  const [progress,   setProgress]   = useState(null);  // 수집 진행 상태
+  const progressRef  = useRef(null);
+  const [newsFilter, setNewsFilter] = useState({src:"all",sev:"all",q:""});
+  const [cveFilter,  setCveFilter]  = useState({sev:"all",src:"all",q:"",days:30});
+  const intervalRef = useRef(null);
+
+  const loadSources = useCallback(async () => {
+    try {
+      const [news, cve] = await Promise.all([
+        fetch(`${API_BASE}/api/news/sources`).then(r=>r.json()),
+        fetch(`${API_BASE}/api/cve/sources`).then(r=>r.json()),
+      ]);
+      const newsList = Array.isArray(news) ? news : [];
+      const cveList  = Array.isArray(cve)  ? cve.map(x=>({...x, isCve:true})) : [];
+      setSrcList([...newsList, ...cveList]);
+    } catch {}
+  }, []);
+
+  const deleteSelected = async () => {
+    if (selSrcs.size === 0) return;
+    const srcs = [...selSrcs];
+    if (!window.confirm(`"${srcs.join(", ")}" 소스의 데이터를 삭제하시겠습니까?`)) return;
+    try {
+      let deleted = 0;
+      // CVE 소스 분리
+      const cveSrcs  = srcs.filter(s => s==="NVD" || s==="CISA KEV");
+      const newsSrcs = srcs.filter(s => s!=="NVD" && s!=="CISA KEV");
+      if (newsSrcs.length > 0) {
+        const r = await fetch(`${API_BASE}/api/news/by-source`, {
+          method:"DELETE", headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({sources: newsSrcs})
+        }).then(r=>r.json());
+        deleted += r.deleted || 0;
+      }
+      if (cveSrcs.length > 0) {
+        const r = await fetch(`${API_BASE}/api/cve/all`, {method:"DELETE"}).then(r=>r.json());
+        deleted += r.deleted || 0;
+        // CVE 즉시 화면 초기화
+        setCves([]); setCveStats({}); setSelCve(null);
+      }
+      alert(`${deleted}건 삭제 완료`);
+      setSelSrcs(new Set());
+      await load();
+      await loadSources();
+    } catch(e) { alert("삭제 실패: "+e.message); }
+  };
+
+  const deleteAll = async () => {
+    if (!window.confirm("전체 뉴스·CVE를 삭제하시겠습니까?")) return;
+    try {
+      const [rNews, rCve] = await Promise.all([
+        fetch(`${API_BASE}/api/news/all`, {method:"DELETE"}).then(r=>r.json()),
+        fetch(`${API_BASE}/api/cve/all`,  {method:"DELETE"}).then(r=>r.json()),
+      ]);
+      // 즉시 화면 초기화
+      setNews([]); setCves([]); setNewsStats({}); setCveStats({});
+      setSelCve(null); setSelNews(null);
+      setSelSrcs(new Set());
+      const msg = `뉴스 ${rNews.deleted}건 + CVE ${rCve.deleted}건 삭제완료${rCve.remaining>0?` (잔여 ${rCve.remaining}건)` : ""}`;
+      alert(msg);
+      await load();
+      await loadSources();
+    } catch(e) { alert("삭제 실패: "+e.message); }
+  };
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [n,c,ns,cs] = await Promise.all([
+        fetch(`${API_BASE}/api/news?limit=50`).then(r=>r.json()),
+        fetch(`${API_BASE}/api/cve?days=30&limit=200`).then(r=>r.json()),
+        fetch(`${API_BASE}/api/news/stats`).then(r=>r.json()),
+        fetch(`${API_BASE}/api/cve/stats`).then(r=>r.json()),
+      ]);
+      setNews(Array.isArray(n)?n:[]);
+      setCves(Array.isArray(c)?c:[]);
+      setNewsStats(ns||{});
+      setCveStats(cs||{});
+      setLastSync(new Date());
+    } catch(e){console.error(e);}
+    setLoading(false);
+  },[]);
+
+  // 페이지 로드 시 localStorage 수집 설정을 백엔드에 동기화
+  useEffect(()=>{
+    const syncConfig = async () => {
+      try {
+        const saved = JSON.parse(localStorage.getItem("ssk_collect_sources")||"{}");
+        if (Object.keys(saved).length > 0) {
+          await fetch(`${API_BASE}/api/intel/collect-config`, {
+            method:"POST", headers:{"Content-Type":"application/json"},
+            body: JSON.stringify(saved)
+          });
+        }
+      } catch {}
+    };
+    syncConfig();
+    load();
+    loadSources();
+    intervalRef.current = setInterval(load, 5*60*1000);
+    return ()=>clearInterval(intervalRef.current);
+  },[load, loadSources]);
+
+  const onCollect = async () => {
+    setCollecting(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/news/fetch`,{method:"POST"}).then(r=>r.json());
+      if (res.running) {
+        alert("이미 수집이 진행 중입니다");
+        setCollecting(false);
+        return;
+      }
+      // 진행 상태 폴링 시작
+      startProgressPoll();
+    } catch(e) {
+      setCollecting(false);
+    }
+  };
+
+  const startProgressPoll = () => {
+    if (progressRef.current) clearInterval(progressRef.current);
+    progressRef.current = setInterval(async () => {
+      try {
+        const p = await fetch(`${API_BASE}/api/intel/progress`).then(r=>r.json());
+        setProgress(p);
+        if (!p.running) {
+          clearInterval(progressRef.current);
+          progressRef.current = null;
+          setCollecting(false);
+          await load();  // 완료 후 데이터 새로고침
+        }
+      } catch {
+        clearInterval(progressRef.current);
+        progressRef.current = null;
+        setCollecting(false);
+      }
+    }, 800);
+  };
+
+  // 언마운트 시 폴링 정리
+  useEffect(() => {
+    return () => { if (progressRef.current) clearInterval(progressRef.current); };
+  }, []);
+
+  const filteredNews = news.filter(n=>{
+    if(newsFilter.src!=="all"&&n.source!==newsFilter.src) return false;
+    if(newsFilter.sev!=="all"&&n.severity!==newsFilter.sev) return false;
+    if(newsFilter.q&&!n.title?.toLowerCase().includes(newsFilter.q.toLowerCase())&&
+       !n.summary?.toLowerCase().includes(newsFilter.q.toLowerCase())) return false;
+    return true;
+  });
+
+  const cutoff = new Date(Date.now()-cveFilter.days*86400000);
+  const filteredCves = cves.filter(c=>{
+    if(cveFilter.sev!=="all"&&c.severity!==cveFilter.sev) return false;
+    if(cveFilter.src!=="all"&&c.source!==cveFilter.src) return false;
+    if(cveFilter.q&&!c.cve_id?.toLowerCase().includes(cveFilter.q.toLowerCase())&&
+       !c.title?.toLowerCase().includes(cveFilter.q.toLowerCase())) return false;
+    if(new Date(c.published_at)<cutoff) return false;
+    return true;
+  }).sort((a,b)=>(b.cvss_score||0)-(a.cvss_score||0));
+
+  const uniqSrc = [...new Set(news.map(n=>n.source).filter(Boolean))];
+
+  const TABS = [
+    {id:"dashboard",icon:"🏠",label:"위협 대시보드"},
+    {id:"news",     icon:"📰",label:"보안 공지·뉴스"},
+    {id:"cve",      icon:"🔴",label:"CVE 모니터"},
+    {id:"kev",      icon:"⚠", label:"CISA KEV"},
+  ];
+
+
+  return (
+    <div style={{padding:"12px 16px",minHeight:"100%"}}>
+      {/* 헤더 */}
+      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
+        <div style={{width:36,height:36,borderRadius:9,background:"rgba(248,113,113,.1)",
+          border:"1px solid rgba(248,113,113,.2)",display:"flex",alignItems:"center",
+          justifyContent:"center",fontSize:18,flexShrink:0}}>🛡</div>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{fontSize:14,fontWeight:700,color:"var(--txt)"}}>위협 인텔리전스 센터</div>
+          <div style={{fontSize:10,color:"var(--txt3)"}}>
+            KrCERT · KISA · CISA KEV · NVD · BleepingComputer
+            {lastSync&&<span style={{marginLeft:8}}>{lastSync.toLocaleTimeString("ko-KR")}</span>}
+          </div>
+        </div>
+        <button onClick={onCollect} disabled={collecting}
+          style={{padding:"6px 14px",borderRadius:7,border:"1px solid rgba(248,113,113,.4)",
+            background:"rgba(248,113,113,.1)",color:"#F87171",fontSize:11,fontWeight:700,
+            cursor:collecting?"wait":"pointer",display:"flex",alignItems:"center",gap:5,flexShrink:0}}>
+          {collecting?<><Spin/> 수집 중...</>:"🔄 즉시 수집"}
+        </button>
+        <button onClick={()=>setShowMgr(p=>!p)}
+          style={{padding:"6px 12px",borderRadius:7,border:"1px solid var(--bdr)",
+            background:showMgr?"var(--bg-active)":"transparent",
+            color:showMgr?"var(--accent-text)":"var(--txt3)",fontSize:11,cursor:"pointer",flexShrink:0}}>
+          🗂 데이터 관리
+        </button>
+      </div>
+
+      {/* 수집 진행 상태 바 */}
+      {progress && progress.running && (
+        <div style={{marginBottom:10,background:"var(--bg-card)",border:"1px solid rgba(96,165,250,.3)",
+          borderRadius:9,overflow:"hidden"}}>
+          {/* 진행바 */}
+          <div style={{height:4,background:"var(--bg-card2)",position:"relative"}}>
+            <div style={{
+              position:"absolute",top:0,left:0,height:"100%",borderRadius:2,
+              background:"linear-gradient(90deg,#3B82F6,#60A5FA)",
+              transition:"width .5s ease",
+              width: progress.total > 0
+                ? `${Math.round((progress.done/progress.total)*100)}%`
+                : "30%",
+              animation: progress.total === 0 ? "indeterminate 1.5s ease-in-out infinite" : "none",
+            }}/>
+          </div>
+          {/* 상태 텍스트 */}
+          <div style={{padding:"8px 14px",display:"flex",alignItems:"center",gap:10}}>
+            <Spin/>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontSize:12,fontWeight:600,color:"var(--txt)",
+                overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                {progress.step || "수집 중..."}
+              </div>
+              <div style={{fontSize:10,color:"var(--txt3)",marginTop:1}}>
+                {progress.total > 0
+                  ? `${progress.done} / ${progress.total} 완료 · 저장 ${progress.saved}건`
+                  : "준비 중..."}
+              </div>
+            </div>
+            {progress.total > 0 && (
+              <div style={{fontSize:16,fontWeight:700,color:"#60A5FA",flexShrink:0}}>
+                {Math.round((progress.done/progress.total)*100)}%
+              </div>
+            )}
+          </div>
+          {/* 단계 로그 (최근 3개) */}
+          {progress.steps?.length > 0 && (
+            <div style={{borderTop:"1px solid var(--bdr)",padding:"5px 14px 7px",
+              display:"flex",flexDirection:"column",gap:2}}>
+              {[...progress.steps].reverse().slice(0,3).map((s,i)=>(
+                <div key={i} style={{fontSize:10,color:i===0?"var(--txt2)":"var(--txt3)",
+                  display:"flex",gap:6}}>
+                  <span style={{color:"var(--txt3)",flexShrink:0}}>{s.ts}</span>
+                  <span>{s.msg}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+      {/* 수집 완료 메시지 */}
+      {progress && !progress.running && progress.finished_at && (
+        <div style={{marginBottom:8,padding:"7px 14px",borderRadius:7,
+          border:`1px solid ${progress.error?"rgba(248,113,113,.3)":"rgba(74,222,128,.3)"}`,
+          background:progress.error?"rgba(248,113,113,.05)":"rgba(74,222,128,.05)",
+          display:"flex",alignItems:"center",gap:8}}>
+          <span style={{fontSize:14}}>{progress.error?"❌":"✅"}</span>
+          <span style={{fontSize:11,color:progress.error?"#F87171":"#4ADE80",fontWeight:600}}>
+            {progress.error ? `수집 오류: ${progress.error}` : progress.step}
+          </span>
+          <button onClick={()=>setProgress(null)}
+            style={{marginLeft:"auto",background:"transparent",border:"none",
+              cursor:"pointer",color:"var(--txt3)",fontSize:13}}>✕</button>
+        </div>
+      )}
+
+      {/* KPI */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(8,1fr)",gap:5,marginBottom:10}}>
+        {[
+          {l:"전체 뉴스",  v:newsStats.total||0,    c:"var(--accent-text)"},
+          {l:"긴급 공지",  v:newsStats.critical||0, c:"#F87171"},
+          {l:"고위험",     v:newsStats.high||0,      c:"#FB923C"},
+          {l:"7일 신규",   v:newsStats.new_7d||0,   c:"#FBBF24"},
+          {l:"전체 CVE",   v:cveStats.total||0,     c:"var(--accent-text)"},
+          {l:"Critical",   v:cveStats.critical||0,  c:"#F87171"},
+          {l:"CISA KEV",   v:cveStats.kev||0,       c:"#F43F5E"},
+          {l:"7일 신규",   v:cveStats.new_7d||0,    c:"#FBBF24"},
+        ].map((k,i)=>(
+          <div key={i} style={{background:"var(--bg-card)",border:"1px solid var(--bdr)",
+            borderRadius:7,padding:"6px 8px",
+            borderTop:`2px solid ${i<4?"rgba(37,99,235,.3)":"rgba(244,63,94,.3)"}`}}>
+            <div style={{fontSize:8,color:"var(--txt3)",marginBottom:2,textTransform:"uppercase",letterSpacing:".04em"}}>{k.l}</div>
+            <div style={{fontSize:16,fontWeight:700,color:k.c}}>{k.v}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* 데이터 관리 패널 */}
+      {showMgr && (
+        <div style={{background:"var(--bg-card)",border:"1px solid var(--bdr)",borderRadius:9,
+          padding:"14px 16px",marginBottom:10}}>
+          <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
+            <span style={{fontSize:12,fontWeight:700,color:"var(--txt)"}}>🗂 뉴스 데이터 관리</span>
+            <span style={{fontSize:10,color:"var(--txt3)"}}>소스를 선택해서 삭제할 수 있습니다</span>
+            <button onClick={loadSources}
+              style={{marginLeft:"auto",padding:"4px 10px",borderRadius:5,border:"1px solid var(--bdr)",
+                background:"transparent",color:"var(--txt3)",fontSize:10,cursor:"pointer"}}>↻ 새로고침</button>
+          </div>
+          <div style={{display:"flex",flexWrap:"wrap",gap:8,marginBottom:12}}>
+            {srcList.map(({source, count, isCve})=>{
+              const isSel = selSrcs.has(source);
+              const isKr  = ["KrCERT","KISA","금융보안원"].includes(source);
+              const color = isSel?"#F87171":isCve?"#FBBF24":isKr?"#60A5FA":"var(--txt3)";
+              return (
+                <div key={source} onClick={()=>setSelSrcs(p=>{const n=new Set(p);isSel?n.delete(source):n.add(source);return n;})}
+                  style={{padding:"7px 12px",borderRadius:7,cursor:"pointer",userSelect:"none",
+                    border:`1px solid ${isSel?"#F87171":"var(--bdr)"}`,
+                    background:isSel?"rgba(248,113,113,.1)":"var(--bg-card2)",
+                    display:"flex",alignItems:"center",gap:6}}>
+                  {isCve && <span style={{fontSize:9,padding:"1px 5px",borderRadius:3,
+                    background:"rgba(251,191,36,.15)",color:"#FBBF24",fontWeight:700}}>CVE</span>}
+                  {!isCve && isKr && <span style={{fontSize:9}}>🇰🇷</span>}
+                  <span style={{fontSize:11,fontWeight:600,color}}>{source}</span>
+                  <span style={{fontSize:10,color:"var(--txt3)",marginLeft:2}}>{count}건</span>
+                  {isSel && <span style={{fontSize:10,color:"#F87171"}}>✓</span>}
+                </div>
+              );
+            })}
+            {srcList.length===0 && (
+              <span style={{fontSize:11,color:"var(--txt3)"}}>수집된 뉴스가 없습니다</span>
+            )}
+          </div>
+          <div style={{display:"flex",gap:8}}>
+            <button onClick={deleteSelected} disabled={selSrcs.size===0}
+              style={{padding:"6px 16px",borderRadius:6,border:"1px solid rgba(248,113,113,.4)",
+                background:selSrcs.size>0?"rgba(248,113,113,.1)":"transparent",
+                color:selSrcs.size>0?"#F87171":"var(--txt3)",fontSize:11,fontWeight:600,
+                cursor:selSrcs.size>0?"pointer":"not-allowed"}}>
+              🗑 선택 소스 삭제 {selSrcs.size>0?`(${selSrcs.size}개 소스)`:""}
+            </button>
+            <button onClick={deleteAll}
+              style={{padding:"6px 16px",borderRadius:6,border:"1px solid rgba(248,113,113,.4)",
+                background:"rgba(248,113,113,.08)",color:"#F87171",fontSize:11,cursor:"pointer"}}>
+              ⚠ 뉴스·CVE 전체 삭제
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* 탭 */}
+      <div style={{display:"flex",gap:0,background:"var(--bg-card2)",borderRadius:7,padding:3,
+        border:"1px solid var(--bdr)",marginBottom:12,width:"fit-content"}}>
+        {TABS.map(t=>(
+          <button key={t.id} onClick={()=>setTab(t.id)}
+            style={{padding:"6px 16px",borderRadius:5,border:"none",cursor:"pointer",
+              fontSize:12,fontWeight:tab===t.id?700:400,
+              background:tab===t.id?"var(--bg-active)":"transparent",
+              color:tab===t.id?"var(--accent-text)":"var(--txt3)",
+              display:"flex",alignItems:"center",gap:4}}>
+            {t.icon} {t.label}
+            {t.id==="kev"&&cveStats.kev>0&&
+              <span style={{fontSize:9,padding:"0 4px",borderRadius:7,
+                background:"rgba(244,63,94,.2)",color:"#F43F5E",fontWeight:700}}>{cveStats.kev}</span>}
+          </button>
+        ))}
+      </div>
+
+      {/* ══ 대시보드 ══ */}
+      {tab==="dashboard"&&(
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+          <div style={{background:"var(--bg-card)",border:"1px solid var(--bdr)",borderRadius:9,overflow:"hidden"}}>
+            <div style={{padding:"9px 13px",background:"rgba(248,113,113,.07)",borderBottom:"1px solid rgba(248,113,113,.15)",
+              display:"flex",alignItems:"center",gap:7}}>
+              <span>🚨</span><span style={{fontSize:11,fontWeight:700,color:"#F87171"}}>긴급·고위험 공지</span>
+              <span style={{fontSize:10,color:"var(--txt3)",marginLeft:"auto"}}>최근 20건</span>
+            </div>
+            <div style={{overflowY:"auto",maxHeight:300}}>
+              {news.filter(n=>n.severity==="critical"||n.severity==="high").slice(0,20).map((n,i)=>(
+                <div key={n.id} onClick={()=>{setSelNews(n);setTab("news");}}
+                  style={{padding:"8px 12px",borderBottom:"1px solid var(--bdr)",cursor:"pointer",
+                    background:i%2===0?"transparent":"var(--bg-card2)"}}
+                  onMouseEnter={e=>e.currentTarget.style.background="var(--bg-hover)"}
+                  onMouseLeave={e=>e.currentTarget.style.background=i%2===0?"transparent":"var(--bg-card2)"}>
+                  <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:3}}>
+                    <SevBadge sev={n.severity} small/><SrcBadge src={n.source}/>
+                    <span style={{fontSize:9,color:"var(--txt3)",marginLeft:"auto"}}>
+                      {new Date(n.published_at).toLocaleDateString("ko-KR",{month:"2-digit",day:"2-digit"})}
+                    </span>
+                  </div>
+                  <div style={{fontSize:11,color:"var(--txt)",lineHeight:1.4,wordBreak:"break-word"}}>
+                    {n.title?.slice(0,70)}{n.title?.length>70?"…":""}
+                  </div>
+                </div>
+              ))}
+              {!news.filter(n=>n.severity==="critical"||n.severity==="high").length&&
+                <div style={{textAlign:"center",padding:"30px",color:"var(--txt3)",fontSize:11}}>수집 버튼을 눌러 최신 위협 정보를 가져오세요</div>}
+            </div>
+          </div>
+          <div style={{background:"var(--bg-card)",border:"1px solid var(--bdr)",borderRadius:9,overflow:"hidden"}}>
+            <div style={{padding:"9px 13px",background:"rgba(244,63,94,.07)",borderBottom:"1px solid rgba(244,63,94,.15)",
+              display:"flex",alignItems:"center",gap:7}}>
+              <span>🔴</span><span style={{fontSize:11,fontWeight:700,color:"#F43F5E"}}>Critical CVE (CVSS 9.0+)</span>
+              <span style={{fontSize:10,color:"var(--txt3)",marginLeft:"auto"}}>최근 30일</span>
+            </div>
+            <div style={{overflowY:"auto",maxHeight:300}}>
+              {cves.filter(c=>c.cvss_score>=9.0).slice(0,15).map((c,i)=>(
+                <div key={c.id} onClick={()=>{setSelCve(c);setTab("cve");}}
+                  style={{padding:"8px 12px",borderBottom:"1px solid var(--bdr)",cursor:"pointer",
+                    background:i%2===0?"transparent":"var(--bg-card2)"}}
+                  onMouseEnter={e=>e.currentTarget.style.background="var(--bg-hover)"}
+                  onMouseLeave={e=>e.currentTarget.style.background=i%2===0?"transparent":"var(--bg-card2)"}>
+                  <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:3}}>
+                    <code style={{fontSize:10,fontWeight:700,color:"#F43F5E"}}>{c.cve_id}</code>
+                    <span style={{marginLeft:"auto",fontSize:11,fontWeight:700,color:"#F87171"}}>CVSS {c.cvss_score?.toFixed(1)}</span>
+                  </div>
+                  <div style={{fontSize:11,color:"var(--txt)",lineHeight:1.4,wordBreak:"break-word"}}>
+                    {c.title?.slice(0,65)}{c.title?.length>65?"…":""}
+                  </div>
+                </div>
+              ))}
+              {!cves.filter(c=>c.cvss_score>=9.0).length&&
+                <div style={{textAlign:"center",padding:"30px",color:"var(--txt3)",fontSize:11}}>수집 버튼을 눌러 최신 CVE 정보를 가져오세요</div>}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ══ 뉴스 탭 ══ */}
+      {tab==="news"&&(
+        <ResizablePanels storageKey="threat_news_w" defaultLeft={300}
+          left={
+          <div style={{minWidth:0,paddingRight:4}}>
+            <div style={{display:"flex",gap:6,marginBottom:8,flexWrap:"wrap"}}>
+              <div style={{position:"relative",flex:1,minWidth:120}}>
+                <span style={{position:"absolute",left:7,top:"50%",transform:"translateY(-50%)",fontSize:11,color:"var(--txt3)",pointerEvents:"none"}}>⌕</span>
+                <input value={newsFilter.q} onChange={e=>setNewsFilter(p=>({...p,q:e.target.value}))}
+                  placeholder="검색" style={{width:"100%",padding:"5px 7px 5px 22px",borderRadius:6,
+                    border:"1px solid var(--bdr)",background:"var(--bg-input)",color:"var(--txt)",fontSize:11,outline:"none"}}/>
+              </div>
+              <select value={newsFilter.src} onChange={e=>setNewsFilter(p=>({...p,src:e.target.value}))}
+                style={{padding:"5px 8px",borderRadius:6,border:"1px solid var(--bdr)",background:"var(--bg-input)",
+                  color:newsFilter.src!=="all"?"var(--accent-text)":"var(--txt3)",fontSize:11,cursor:"pointer"}}>
+                <option value="all">전체</option>
+                {uniqSrc.map(s=><option key={s} value={s}>{s}</option>)}
+              </select>
+              <select value={newsFilter.sev} onChange={e=>setNewsFilter(p=>({...p,sev:e.target.value}))}
+                style={{padding:"5px 8px",borderRadius:6,border:"1px solid var(--bdr)",background:"var(--bg-input)",
+                  color:newsFilter.sev!=="all"?"var(--accent-text)":"var(--txt3)",fontSize:11,cursor:"pointer"}}>
+                <option value="all">전체</option>
+                {["critical","high","medium","low"].map(s=><option key={s} value={s}>{SEV[s]?.label||s}</option>)}
+              </select>
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:5}}>
+              {filteredNews.map((n,i)=>{
+                const isSel=selNews?.id===n.id;
+                return (
+                  <div key={n.id} onClick={()=>setSelNews(isSel?null:n)}
+                    style={{background:"var(--bg-card)",
+                      border:`1px solid ${isSel?SEV[n.severity]?.border||"var(--accent)":"var(--bdr)"}`,
+                      borderLeft:`3px solid ${isSel?SEV[n.severity]?.color||"var(--accent)":"transparent"}`,
+                      borderRadius:7,padding:"8px 11px",cursor:"pointer"}}
+                    onMouseEnter={e=>!isSel&&(e.currentTarget.style.background="var(--bg-hover)")}
+                    onMouseLeave={e=>!isSel&&(e.currentTarget.style.background="var(--bg-card)")}>
+                    <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:4}}>
+                      <SevBadge sev={n.severity} small/><SrcBadge src={n.source}/>
+                      <span style={{fontSize:9,color:"var(--txt3)",marginLeft:"auto"}}>
+                        {new Date(n.published_at).toLocaleDateString("ko-KR",{month:"2-digit",day:"2-digit"})}
+                      </span>
+                    </div>
+                    <div style={{fontSize:11,fontWeight:500,color:isSel?"var(--accent-text)":"var(--txt)",
+                      lineHeight:1.4,wordBreak:"break-word"}}>
+                      {n.title?.slice(0,70)}{n.title?.length>70?"…":""}
+                    </div>
+                  </div>
+                );
+              })}
+              {!filteredNews.length&&(
+                <div style={{textAlign:"center",padding:"50px 0",color:"var(--txt3)"}}>
+                  <div style={{fontSize:32,marginBottom:8,opacity:.3}}>📭</div>
+                  수집된 뉴스가 없습니다
+                </div>
+              )}
+            </div>
+          </div>}
+          right={<NewsDetail item={selNews} onClose={()=>setSelNews(null)}/>}
+        />
+      )}
+
+      {/* ══ CVE 탭 ══ */}
+      {tab==="cve"&&(
+        <div>
+          {CVE_GUIDE}
+          <ResizablePanels storageKey="threat_cve_w" defaultLeft={320}
+            left={
+            <div style={{minWidth:0,paddingRight:4}}>
+              <div style={{display:"flex",gap:5,marginBottom:8,flexWrap:"wrap"}}>
+                <div style={{position:"relative",flex:1,minWidth:100}}>
+                  <span style={{position:"absolute",left:7,top:"50%",transform:"translateY(-50%)",fontSize:11,color:"var(--txt3)",pointerEvents:"none"}}>⌕</span>
+                  <input value={cveFilter.q} onChange={e=>setCveFilter(p=>({...p,q:e.target.value}))}
+                    placeholder="CVE 검색" style={{width:"100%",padding:"5px 7px 5px 22px",borderRadius:6,
+                      border:"1px solid var(--bdr)",background:"var(--bg-input)",color:"var(--txt)",fontSize:11,outline:"none"}}/>
+                </div>
+                <select value={cveFilter.sev} onChange={e=>setCveFilter(p=>({...p,sev:e.target.value}))}
+                  style={{padding:"5px 7px",borderRadius:6,border:"1px solid var(--bdr)",background:"var(--bg-input)",
+                    color:cveFilter.sev!=="all"?"var(--accent-text)":"var(--txt3)",fontSize:11,cursor:"pointer"}}>
+                  <option value="all">전체</option>
+                  {["critical","high","medium"].map(s=><option key={s} value={s}>{SEV[s]?.label||s}</option>)}
+                </select>
+                {[7,14,30,90].map(d=>(
+                  <button key={d} onClick={()=>setCveFilter(p=>({...p,days:d}))}
+                    style={{padding:"5px 8px",borderRadius:6,fontSize:11,cursor:"pointer",
+                      border:`1px solid ${cveFilter.days===d?"var(--accent)":"var(--bdr)"}`,
+                      background:cveFilter.days===d?"var(--bg-active)":"transparent",
+                      color:cveFilter.days===d?"var(--accent-text)":"var(--txt3)"}}>
+                    {d}일
+                  </button>
+                ))}
+              </div>
+              <div style={{background:"var(--bg-card)",border:"1px solid var(--bdr)",borderRadius:9,overflow:"hidden"}}>
+                <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+                  <thead><tr style={{background:"var(--bg-card2)"}}>
+                    {["CVE ID","CVSS","심각도","소스","취약점명","날짜"].map(h=>(
+                      <th key={h} style={{padding:"7px 8px",textAlign:"left",fontSize:9,fontWeight:700,
+                        color:"var(--txt3)",textTransform:"uppercase",letterSpacing:".04em",
+                        borderBottom:"1px solid var(--bdr)",whiteSpace:"nowrap"}}>{h}</th>
+                    ))}
+                  </tr></thead>
+                  <tbody>
+                    {filteredCves.slice(0,100).map((c,i)=>{
+                      const isSel=selCve?.id===c.id;
+                      const cc=c.cvss_score>=9?"#F87171":c.cvss_score>=7?"#FB923C":"#FBBF24";
+                      return (
+                        <tr key={c.id} onClick={()=>setSelCve(isSel?null:c)}
+                          style={{borderBottom:"1px solid var(--bdr)",cursor:"pointer",
+                            background:isSel?"var(--bg-active)":i%2===0?"transparent":"var(--bg-card2)"}}
+                          onMouseEnter={e=>!isSel&&(e.currentTarget.style.background="var(--bg-hover)")}
+                          onMouseLeave={e=>!isSel&&(e.currentTarget.style.background=isSel?"var(--bg-active)":i%2===0?"transparent":"var(--bg-card2)")}>
+                          <td style={{padding:"7px 8px"}}>
+                            <code style={{fontSize:10,fontWeight:700,color:"#60A5FA"}}>{c.cve_id}</code>
+                            {c.source==="CISA KEV"&&<div style={{fontSize:8,color:"#F43F5E",fontWeight:700}}>⚠ KEV</div>}
+                          </td>
+                          <td style={{padding:"7px 8px",fontWeight:700,color:cc,whiteSpace:"nowrap"}}>{c.cvss_score?.toFixed(1)||"—"}</td>
+                          <td style={{padding:"7px 8px"}}><SevBadge sev={c.severity} small/></td>
+                          <td style={{padding:"7px 8px"}}><SrcBadge src={c.source}/></td>
+                          <td style={{padding:"7px 8px",color:"var(--txt)",maxWidth:160}}>
+                            <div style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                              {c.title?.replace(c.cve_id+": ","")?.slice(0,60)}
+                            </div>
+                          </td>
+                          <td style={{padding:"7px 8px",color:"var(--txt3)",whiteSpace:"nowrap",fontSize:10}}>
+                            {c.published_at ? new Date(c.published_at).toLocaleDateString("ko-KR",{month:"2-digit",day:"2-digit"}) : "—"}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                {!filteredCves.length&&(
+                  <div style={{textAlign:"center",padding:"40px",color:"var(--txt3)",fontSize:12}}>
+                    수집된 CVE가 없습니다 — 즉시 수집 버튼을 눌러주세요
+                  </div>
+                )}
+              </div>
+            </div>}
+            right={<CveDetail item={selCve} onClose={()=>setSelCve(null)}/>}
+          />
+        </div>
+      )}
+
+      {/* ══ KEV 탭 ══ */}
+      {tab==="kev"&&(
+        <div>
+          {KEV_GUIDE}
+          <ResizablePanels storageKey="threat_kev_w" defaultLeft={320}
+            left={
+            <div style={{display:"flex",flexDirection:"column",gap:7,minWidth:0,overflowY:"auto",
+              maxHeight:"calc(100vh - 380px)",paddingRight:4}}>
+              {cves.filter(c=>c.source==="CISA KEV")
+                .sort((a,b)=>new Date(b.published_at)-new Date(a.published_at))
+                .map((c,i)=>{
+                let affected=[];try{affected=JSON.parse(c.affected_products||"[]");}catch{}
+                const duePast=c.kev_due_date&&new Date(c.kev_due_date)<new Date();
+                const isSel=selCve?.id===c.id;
+                return (
+                  <div key={c.id} onClick={()=>setSelCve(isSel?null:c)}
+                    style={{background:"var(--bg-card)",
+                      border:`1px solid ${isSel?"#F43F5E":"rgba(244,63,94,.2)"}`,
+                      borderLeft:`3px solid ${isSel?"#F43F5E":"rgba(244,63,94,.4)"}`,
+                      borderRadius:7,padding:"10px 12px",cursor:"pointer"}}
+                    onMouseEnter={e=>!isSel&&(e.currentTarget.style.background="var(--bg-hover)")}
+                    onMouseLeave={e=>!isSel&&(e.currentTarget.style.background="var(--bg-card)")}>
+                    <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:4}}>
+                      <code style={{fontSize:10,fontWeight:700,color:"#F43F5E"}}>{c.cve_id}</code>
+                      <span style={{marginLeft:"auto",fontSize:11,fontWeight:700,color:"#F87171"}}>
+                        CVSS {c.cvss_score?.toFixed(1)}
+                      </span>
+                    </div>
+                    <div style={{fontSize:11,color:isSel?"var(--accent-text)":"var(--txt)",
+                      marginBottom:4,lineHeight:1.4,wordBreak:"break-word"}}>
+                      {c.title?.replace(c.cve_id+": ","")?.replace("[KEV] ","")?.slice(0,65)}
+                    </div>
+                    {affected.length>0&&(
+                      <div style={{fontSize:9,color:"var(--txt3)",marginBottom:3}}>
+                        📦 {affected.slice(0,2).join(" / ")}
+                      </div>
+                    )}
+                    {c.kev_due_date&&(
+                      <div style={{fontSize:10,fontWeight:600,color:duePast?"#F87171":"#FBBF24"}}>
+                        {duePast?"⚠ 기한초과: ":"📅 "}{c.kev_due_date}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+              {!cves.filter(c=>c.source==="CISA KEV").length&&(
+                <div style={{textAlign:"center",padding:"40px",color:"var(--txt3)"}}>
+                  <div style={{fontSize:32,marginBottom:8,opacity:.3}}>⚠</div>
+                  CISA KEV 데이터 없음 — 즉시 수집 버튼을 눌러주세요
+                </div>
+              )}
+            </div>}
+            right={<CveDetail item={selCve} onClose={()=>setSelCve(null)}/>}
+          />
+        </div>
+      )}
+
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}} @keyframes indeterminate{0%{left:-40%;width:40%}60%{left:100%;width:40%}100%{left:100%;width:40%}}`}</style>
+    </div>
+  );
+}

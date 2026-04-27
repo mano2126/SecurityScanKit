@@ -1,0 +1,22 @@
+# 환경변수 / 설정파일
+.env
+*.env
+config/local.py
+secrets.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 로그/결과물
+*.log
+scan_results/
+reports/output/
+EOF

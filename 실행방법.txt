@@ -1,0 +1,17 @@
+프론트엔드 (새 CMD 창)
+cmdcd SecurityScanKit\frontend
+npm install
+npm run dev
+
+
+백엔드 먼저
+cmdcd SecurityScanKit\backend
+pip install -r requirements.txt
+uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+
+
+ID  : admin
+PW  : Admin@2026!
+
+

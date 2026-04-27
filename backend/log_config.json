@@ -1,0 +1,200 @@
+{
+  "version": 1,
+  "disable_existing_loggers": false,
+  "formatters": {
+    "default": {
+      "()": "uvicorn.logging.DefaultFormatter",
+      "fmt": "%(levelprefix)s %(message)s",
+      "use_colors": true
+    },
+    "access": {
+      "()": "uvicorn.logging.AccessFormatter",
+      "fmt": "%(levelprefix)s %(client_addr)s - \"%(request_line)s\" %(status_code)s"
+    }
+  },
+  "handlers": {
+    "default": {
+      "class": "logging.StreamHandler",
+      "formatter": "default",
+      "stream": "ext://sys.stderr"
+    },
+    "access": {
+      "class": "logging.StreamHandler",
+      "formatter": "access",
+      "stream": "ext://sys.stdout"
+    },
+    "null": {
+      "class": "logging.NullHandler"
+    }
+  },
+  "loggers": {
+    "uvicorn": {
+      "handlers": [
+        "default"
+      ],
+      "level": "INFO",
+      "propagate": false
+    },
+    "uvicorn.error": {
+      "handlers": [
+        "default"
+      ],
+      "level": "INFO",
+      "propagate": false
+    },
+    "uvicorn.access": {
+      "handlers": [
+        "access"
+      ],
+      "level": "INFO",
+      "propagate": false
+    },
+    "websockets": {
+      "handlers": [
+        "null"
+      ],
+      "level": "CRITICAL",
+      "propagate": false
+    },
+    "websockets.server": {
+      "handlers": [
+        "null"
+      ],
+      "level": "CRITICAL",
+      "propagate": false
+    },
+    "websockets.client": {
+      "handlers": [
+        "null"
+      ],
+      "level": "CRITICAL",
+      "propagate": false
+    },
+    "websockets.protocol": {
+      "handlers": [
+        "null"
+      ],
+      "level": "CRITICAL",
+      "propagate": false
+    },
+    "websockets.legacy": {
+      "handlers": [
+        "null"
+      ],
+      "level": "CRITICAL",
+      "propagate": false
+    },
+    "websockets.legacy.server": {
+      "handlers": [
+        "null"
+      ],
+      "level": "CRITICAL",
+      "propagate": false
+    },
+    "websockets.legacy.client": {
+      "handlers": [
+        "null"
+      ],
+      "level": "CRITICAL",
+      "propagate": false
+    },
+    "websockets.legacy.protocol": {
+      "handlers": [
+        "null"
+      ],
+      "level": "CRITICAL",
+      "propagate": false
+    },
+    "uvicorn.protocols": {
+      "handlers": [
+        "null"
+      ],
+      "level": "CRITICAL",
+      "propagate": false
+    },
+    "uvicorn.protocols.websockets": {
+      "handlers": [
+        "null"
+      ],
+      "level": "CRITICAL",
+      "propagate": false
+    },
+    "uvicorn.protocols.websockets.websockets_impl": {
+      "handlers": [
+        "null"
+      ],
+      "level": "CRITICAL",
+      "propagate": false
+    },
+    "uvicorn.protocols.websockets.wsproto_impl": {
+      "handlers": [
+        "null"
+      ],
+      "level": "CRITICAL",
+      "propagate": false
+    },
+    "uvicorn.protocols.http": {
+      "handlers": [
+        "null"
+      ],
+      "level": "CRITICAL",
+      "propagate": false
+    },
+    "uvicorn.protocols.http.h11_impl": {
+      "handlers": [
+        "null"
+      ],
+      "level": "CRITICAL",
+      "propagate": false
+    },
+    "uvicorn.protocols.http.httptools_impl": {
+      "handlers": [
+        "null"
+      ],
+      "level": "CRITICAL",
+      "propagate": false
+    },
+    "h11": {
+      "handlers": [
+        "null"
+      ],
+      "level": "CRITICAL",
+      "propagate": false
+    },
+    "asyncio": {
+      "handlers": [
+        "null"
+      ],
+      "level": "CRITICAL",
+      "propagate": false
+    },
+    "ssk": {
+      "handlers": [
+        "default"
+      ],
+      "level": "DEBUG",
+      "propagate": false
+    },
+    "core.intel_collector": {
+      "handlers": [
+        "default"
+      ],
+      "level": "INFO",
+      "propagate": false
+    },
+    "sqlalchemy.engine": {
+      "handlers": [
+        "null"
+      ],
+      "level": "CRITICAL",
+      "propagate": false
+    },
+    "": {
+      "handlers": [
+        "null"
+      ],
+      "level": "WARNING",
+      "propagate": false
+    }
+  }
+}
